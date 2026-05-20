@@ -1,10 +1,14 @@
-import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
   describeChatCandidate,
   readRecentImessagesFromContact,
   type ImessageLookupResult,
 } from "./imessage-lookup.js";
+import { createClaudeMcpServer } from "./runtimes/claude.js";
+import { defineRuntimeTool } from "./runtimes/tool.js";
+import { runtimeText, type RuntimeTool } from "./runtimes/types.js";
+
+const NAMESPACE = "boop-imessage";
 
 function fmtWhen(ms: number): string {
   if (!ms) return "unknown time";
@@ -57,12 +61,10 @@ function formatLookup(result: ImessageLookupResult): string {
   return [...header, "", "Recent messages, oldest first:", ...lines].join("\n");
 }
 
-export function createImessageMcp() {
-  return createSdkMcpServer({
-    name: "boop-imessage",
-    version: "0.1.0",
-    tools: [
-      tool(
+export function createImessageTools(): RuntimeTool[] {
+  return [
+      defineRuntimeTool(
+        NAMESPACE,
         "recent_messages_from_contact",
         `Read the user's recent local iMessage/SMS history with a named contact. Use ONLY when the user explicitly asks to look at recent messages/texts/iMessages from someone, summarize what someone said, or inspect a named conversation. The contact can be a normal name like "Isaac"; the tool resolves names through the imsg CLI chat metadata and reads history through imsg.`,
         {
@@ -76,11 +78,12 @@ export function createImessageMcp() {
         },
         async (args) => {
           const result = readRecentImessagesFromContact(args.contact, args.limit ?? 12);
-          return {
-            content: [{ type: "text" as const, text: formatLookup(result) }],
-          };
+          return runtimeText(formatLookup(result));
         },
       ),
-    ],
-  });
+    ];
+}
+
+export function createImessageMcp() {
+  return createClaudeMcpServer(NAMESPACE, createImessageTools());
 }

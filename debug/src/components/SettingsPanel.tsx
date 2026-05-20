@@ -1,6 +1,27 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
+import {
+  RuntimeProviderBadge,
+  RuntimeProviderLogo,
+  type RuntimeProvider,
+} from "../lib/branding.js";
+import { BrowserSection } from "./BrowserSection.js";
+
+type RuntimeChoice = "claude" | "codex";
+type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+
+interface Option<T extends string = string> {
+  value: T;
+  label: string;
+}
+
+interface RuntimeConfigSnapshot {
+  runtime: RuntimeChoice;
+  model: string;
+  reasoningEffort?: ReasoningEffort;
+  billingMode: "api" | "codex-subscription";
+}
 
 interface ToggleSetting {
   kind: "toggle";
@@ -37,7 +58,36 @@ const SETTINGS: Setting[] = [
   },
 ];
 
-// A short curated list for the dropdown — covers most US users plus a few
+const RUNTIME_SETTING_COUNT = SETTINGS.length + 2;
+
+const RUNTIME_OPTIONS: Option<RuntimeChoice>[] = [
+  { value: "claude", label: "Claude" },
+  { value: "codex", label: "Codex" },
+];
+
+const CLAUDE_MODELS: Option[] = [
+  { value: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  { value: "claude-opus-4-7", label: "Opus 4.7" },
+  { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+];
+
+const CODEX_MODELS: Option[] = [
+  { value: "gpt-5.5", label: "GPT-5.5" },
+  { value: "gpt-5.4", label: "GPT-5.4" },
+  { value: "gpt-5.4-mini", label: "GPT-5.4 Mini" },
+  { value: "gpt-5.3-codex", label: "GPT-5.3 Agent" },
+  { value: "gpt-5.2", label: "GPT-5.2" },
+];
+
+const CODEX_REASONING_EFFORTS: Option<ReasoningEffort>[] = [
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "XHigh" },
+];
+
+// A short curated list for the dropdown, covering most US users plus a few
 // common international zones. The text input next to the dropdown lets the
 // user paste any IANA ID for the long tail.
 const COMMON_TIMEZONES: Array<{ value: string; label: string }> = [
@@ -57,27 +107,78 @@ const COMMON_TIMEZONES: Array<{ value: string; label: string }> = [
   { value: "UTC", label: "UTC" },
 ];
 
-export function SettingsPanel({ isDark }: { isDark: boolean }) {
-  const muted = isDark ? "text-slate-500" : "text-slate-400";
+function optionValue<T extends string>(
+  stored: string | null | undefined,
+  options: Option<T>[],
+  fallback: T,
+): T {
+  return options.some((o) => o.value === stored) ? (stored as T) : fallback;
+}
 
+function settingDebug(key: string, value: string | null | undefined, fallback: string) {
+  if (value === undefined) return `settings.${key} = …`;
+  if (value === null) return `settings.${key} = (unset, default ${fallback})`;
+  return `settings.${key} = "${value}"`;
+}
+
+async function updateRuntimeConfig(
+  patch: Partial<{
+    runtime: RuntimeChoice;
+    model: string;
+    reasoningEffort: ReasoningEffort;
+  }>,
+): Promise<RuntimeConfigSnapshot> {
+  const res = await fetch("/api/runtime-config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `Runtime config update failed (${res.status})`);
+  }
+  return (await res.json()) as RuntimeConfigSnapshot;
+}
+
+export function SettingsPanel({ isDark }: { isDark: boolean }) {
   return (
-    <div className="flex flex-col h-full -m-5">
-      <div
-        className={`shrink-0 border-b px-5 py-3 flex items-center gap-3 ${
-          isDark ? "border-slate-800" : "border-slate-200"
-        }`}
-      >
-        <h2
-          className={`text-xs font-semibold uppercase tracking-wider ${
-            isDark ? "text-slate-500" : "text-slate-400"
-          }`}
-        >
-          Agent Settings
-        </h2>
-        <span className={`text-xs mono ${muted}`}>{SETTINGS.length} setting(s)</span>
+    <div className="mx-auto max-w-[880px] space-y-5 pb-10">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div
+            className={`text-[11px] font-medium uppercase tracking-[0.08em] ${
+              isDark ? "text-zinc-500" : "text-zinc-400"
+            }`}
+          >
+            Preferences
+          </div>
+          <h2
+            className={`mt-1 text-[22px] font-semibold tracking-normal ${
+              isDark ? "text-zinc-50" : "text-zinc-950"
+            }`}
+          >
+            Settings
+          </h2>
+          <p className={`mt-1 text-sm ${isDark ? "text-zinc-400" : "text-zinc-500"}`}>
+            Runtime, model, and local agent preferences.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`rounded-2xl border px-2.5 py-1 text-xs mono ${
+              isDark
+                ? "border-white/10 bg-white/5 text-zinc-500"
+                : "border-zinc-200 bg-white text-zinc-500"
+            }`}
+          >
+            {RUNTIME_SETTING_COUNT} controls
+          </span>
+          <SettingsRuntimeBadge isDark={isDark} />
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto debug-scroll p-5 space-y-3">
+      <div className="space-y-3">
+        <RuntimeRow isDark={isDark} />
         {SETTINGS.map((s) =>
           s.kind === "toggle" ? (
             <ToggleRow key={s.key} setting={s} isDark={isDark} />
@@ -85,8 +186,181 @@ export function SettingsPanel({ isDark }: { isDark: boolean }) {
             <TimezoneRow key={s.key} setting={s} isDark={isDark} />
           ),
         )}
+        <BrowserSection isDark={isDark} />
+        <DemoModeRow isDark={isDark} />
       </div>
     </div>
+  );
+}
+
+function SettingsRuntimeBadge({ isDark }: { isDark: boolean }) {
+  const storedRuntime = useQuery(api.settings.get, { key: "runtime" });
+  const [serverConfig, setServerConfig] = useState<RuntimeConfigSnapshot | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/runtime-config")
+      .then((res) => {
+        if (!res.ok) throw new Error(`Runtime config fetch failed (${res.status})`);
+        return res.json() as Promise<RuntimeConfigSnapshot>;
+      })
+      .then((config) => {
+        if (!cancelled) setServerConfig(config);
+      })
+      .catch(() => {
+        if (!cancelled) setServerConfig(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storedRuntime]);
+
+  const runtime: RuntimeProvider =
+    storedRuntime === "claude" || storedRuntime === "codex"
+      ? storedRuntime
+      : serverConfig?.runtime ?? "claude";
+
+  if (storedRuntime === undefined && serverConfig === null) return null;
+
+  return (
+    <RuntimeProviderBadge
+      runtime={runtime}
+      model={serverConfig?.runtime === runtime ? serverConfig.model : undefined}
+      isDark={isDark}
+      className="shrink-0"
+    />
+  );
+}
+
+function DemoModeRow({ isDark }: { isDark: boolean }) {
+  const status = useQuery(api.demo.status);
+  const setDemoMode = useMutation(api.demo.setMode);
+  const [saving, setSaving] = useState<"toggle" | "reseed" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const loading = status === undefined;
+  const enabled = status?.enabled ?? false;
+  const seeded = status?.seeded ?? false;
+  const counts = status?.counts;
+  const rowCount = status?.total ?? 0;
+  const summary = counts
+    ? `${counts.agents} agents / ${counts.agentLogs} logs / ${counts.memories} memories / ${counts.automationRuns} automation runs`
+    : "Preparing demo dataset status";
+  const debugLine = loading
+    ? "settings.debug_demo_mode = ..."
+    : `settings.debug_demo_mode = "${enabled ? "true" : "false"}" · ${rowCount} demo rows`;
+
+  async function toggle() {
+    if (loading || saving) return;
+    setSaving("toggle");
+    setError(null);
+    try {
+      await setDemoMode({ enabled: !enabled });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function reseed() {
+    if (loading || saving) return;
+    setSaving("reseed");
+    setError(null);
+    try {
+      await setDemoMode({ enabled: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const btnBg = isDark
+    ? "bg-zinc-100 text-zinc-950 hover:bg-white"
+    : "bg-zinc-950 text-white hover:bg-zinc-800";
+  const secondaryBg = isDark
+    ? "border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10"
+    : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50";
+  const statusTone = enabled
+    ? isDark
+      ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-300"
+      : "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : isDark
+      ? "border-white/10 bg-white/5 text-zinc-400"
+      : "border-zinc-200 bg-zinc-50 text-zinc-500";
+
+  return (
+    <SettingShell
+      label="Demo mode"
+      description="Seeds realistic namespaced records across agents, tool traces, memories, memory events, automations, conversations, consolidation, and usage so every dashboard screen has data to inspect."
+      debugLine={debugLine}
+      isDark={isDark}
+      control={
+        <div className="flex w-full flex-col items-end gap-2 lg:min-w-[390px]">
+          <div className="flex w-full items-center justify-end gap-2">
+            <span
+              className={`min-w-0 flex-1 rounded-2xl border px-3 py-2 text-[11px] leading-relaxed ${statusTone}`}
+            >
+              <span className="font-medium">
+                {enabled ? "Demo data enabled" : seeded ? "Demo data staged" : "Real data only"}
+              </span>
+              <span className="block truncate mono opacity-80">{summary}</span>
+            </span>
+            <button
+              onClick={toggle}
+              disabled={loading || saving !== null}
+              role="switch"
+              aria-checked={enabled}
+              aria-label="Toggle demo mode"
+              className={`toggle-switch relative inline-flex h-6 w-11 shrink-0 items-center rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                loading || saving !== null ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+              } ${
+                enabled
+                  ? isDark
+                    ? "bg-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-[#202024]"
+                    : "bg-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-white"
+                  : isDark
+                    ? "bg-zinc-700 focus:ring-zinc-500/50 focus:ring-offset-[#202024]"
+                    : "bg-zinc-300 focus:ring-zinc-400/50 focus:ring-offset-white"
+              }`}
+            >
+              <span
+                className={`toggle-thumb inline-block h-5 w-5 transform rounded-full bg-white shadow ${
+                  enabled ? "translate-x-5" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {enabled && (
+              <button
+                onClick={reseed}
+                disabled={loading || saving !== null}
+                className={`rounded-xl border px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${secondaryBg}`}
+              >
+                {saving === "reseed" ? "Reseeding..." : "Reseed"}
+              </button>
+            )}
+            <button
+              onClick={toggle}
+              disabled={loading || saving !== null}
+              className={`rounded-xl px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${btnBg}`}
+            >
+              {saving === "toggle"
+                ? enabled
+                  ? "Clearing..."
+                  : "Seeding..."
+                : enabled
+                  ? "Turn off"
+                  : "Seed demo data"}
+            </button>
+          </div>
+          {error && <div className="text-[11px] text-rose-400">{error}</div>}
+        </div>
+      }
+    />
   );
 }
 
@@ -100,41 +374,249 @@ function SettingShell({
   label: string;
   description: string;
   debugLine: string;
-  control: React.ReactNode;
+  control: ReactNode;
   isDark: boolean;
 }) {
   const cardBg = isDark
-    ? "bg-slate-900/40 border-slate-800/60"
-    : "bg-white border-slate-200";
+    ? "bg-[#202024] border-white/10 shadow-black/20"
+    : "bg-white border-zinc-200 shadow-zinc-200/50";
   return (
     <div
-      className={`border rounded-xl p-4 flex items-start justify-between gap-6 fade-in ${cardBg}`}
+      className={`rounded-2xl border p-4 shadow-sm fade-in ${cardBg}`}
+      title={debugLine}
     >
-      <div className="min-w-0 flex-1">
-        <div
-          className={`text-sm font-medium ${
-            isDark ? "text-slate-200" : "text-slate-800"
-          }`}
-        >
-          {label}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between lg:gap-8">
+        <div className="min-w-0 flex-1">
+          <div
+            className={`text-sm font-semibold ${
+              isDark ? "text-zinc-100" : "text-zinc-900"
+            }`}
+          >
+            {label}
+          </div>
+          <div
+            className={`mt-1 max-w-[34rem] text-xs leading-relaxed ${
+              isDark ? "text-zinc-400" : "text-zinc-500"
+            }`}
+          >
+            {description}
+          </div>
         </div>
-        <div
-          className={`text-xs mt-1 leading-relaxed ${
-            isDark ? "text-slate-400" : "text-slate-600"
-          }`}
-        >
-          {description}
-        </div>
-        <div
-          className={`text-[10px] mono mt-2 ${
-            isDark ? "text-slate-600" : "text-slate-400"
-          }`}
-        >
-          {debugLine}
-        </div>
+        <div className="w-full lg:w-auto lg:shrink-0">{control}</div>
       </div>
-      <div className="shrink-0">{control}</div>
     </div>
+  );
+}
+
+function RuntimeRow({ isDark }: { isDark: boolean }) {
+  const storedRuntime = useQuery(api.settings.get, { key: "runtime" });
+  const storedClaudeModel = useQuery(api.settings.get, { key: "model" });
+  const storedHostedModel = useQuery(api.settings.get, { key: "codex_model" });
+  const storedHostedEffort = useQuery(api.settings.get, {
+    key: "codex_reasoning_effort",
+  });
+
+  const [serverConfig, setServerConfig] = useState<RuntimeConfigSnapshot | null>(
+    null,
+  );
+  const [saving, setSaving] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshServerConfig = useCallback(async () => {
+    const res = await fetch("/api/runtime-config");
+    if (!res.ok) throw new Error(`Runtime config fetch failed (${res.status})`);
+    setServerConfig((await res.json()) as RuntimeConfigSnapshot);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/runtime-config")
+      .then((res) => {
+        if (!res.ok) throw new Error(`Runtime config fetch failed (${res.status})`);
+        return res.json() as Promise<RuntimeConfigSnapshot>;
+      })
+      .then((config) => {
+        if (!cancelled) {
+          setServerConfig(config);
+          setError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshServerConfig, storedRuntime, storedClaudeModel, storedHostedModel, storedHostedEffort]);
+
+  const runtime: RuntimeChoice =
+    storedRuntime === "claude" || storedRuntime === "codex"
+      ? storedRuntime
+      : serverConfig?.runtime ?? "claude";
+
+  const activeModelOptions = runtime === "codex" ? CODEX_MODELS : CLAUDE_MODELS;
+  const modelKey = runtime === "codex" ? "codex_model" : "model";
+  const storedModel = runtime === "codex" ? storedHostedModel : storedClaudeModel;
+  const firstModelValue = activeModelOptions[0]?.value ?? "";
+  const serverModelFallback =
+    serverConfig?.runtime === runtime ? serverConfig.model : firstModelValue;
+  const modelFallback =
+    serverConfig?.runtime === runtime
+      ? optionValue(serverConfig.model, activeModelOptions, firstModelValue)
+      : firstModelValue;
+  const activeModel = optionValue(storedModel, activeModelOptions, modelFallback);
+  const reasoningEffort = optionValue(
+    storedHostedEffort,
+    CODEX_REASONING_EFFORTS,
+    serverConfig?.reasoningEffort ?? "medium",
+  );
+
+  async function savePatch(
+    key: string,
+    patch: Partial<{
+      runtime: RuntimeChoice;
+      model: string;
+      reasoningEffort: ReasoningEffort;
+    }>,
+  ) {
+    setSaving(key);
+    setError(null);
+    try {
+      const next = await updateRuntimeConfig(patch);
+      setServerConfig(next);
+      await refreshServerConfig().catch(() => undefined);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const runtimeLoading = storedRuntime === undefined && serverConfig === null;
+  const debugParts = [
+    settingDebug("runtime", storedRuntime, serverConfig?.runtime ?? "claude"),
+    settingDebug(modelKey, storedModel, serverModelFallback),
+  ];
+  if (runtime === "codex") {
+    debugParts.push(
+      settingDebug(
+        "codex_reasoning_effort",
+        storedHostedEffort,
+        serverConfig?.reasoningEffort ?? "medium",
+      ),
+    );
+  }
+  debugParts.push(`billing: ${serverConfig?.billingMode ?? "…"}`);
+
+  const inputBg = isDark
+    ? "bg-[#17171a] border-white/10 text-zinc-100"
+    : "bg-zinc-50 border-zinc-200 text-zinc-900";
+  const segmentBase = isDark
+    ? "border-white/10 bg-[#17171a] text-zinc-400"
+    : "border-zinc-200 bg-zinc-100 text-zinc-500";
+  const segmentActive = isDark
+    ? "bg-zinc-100 text-zinc-950 shadow-sm"
+    : "bg-white text-zinc-950 shadow-sm";
+
+  return (
+    <SettingShell
+      label="AI provider"
+      description="Choose the provider for new top-level turns. Running agents keep the provider and model they started with."
+      debugLine={debugParts.join(" · ")}
+      isDark={isDark}
+      control={
+        <div className="flex w-full min-w-0 flex-col items-end gap-3 lg:min-w-[360px]">
+          <div
+            className={`segmented-control grid w-full grid-cols-2 rounded-2xl border p-1 ${segmentBase}`}
+            role="group"
+            aria-label="AI provider"
+          >
+            {RUNTIME_OPTIONS.map((option) => {
+              const active = runtime === option.value;
+              return (
+                <button
+                  key={option.value}
+                  onClick={() =>
+                    savePatch(`runtime:${option.value}`, { runtime: option.value })
+                  }
+                  disabled={runtimeLoading || saving !== null || active}
+                  className={`segmented-button inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium disabled:opacity-60 ${
+                    active ? segmentActive : isDark ? "hover:bg-white/5" : "hover:bg-white/70"
+                  }`}
+                >
+                  <span aria-hidden="true">
+                    <RuntimeProviderLogo runtime={option.value} size={14} />
+                  </span>
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
+            <label className="flex flex-col gap-1">
+              <span
+                className={`text-[10px] font-medium uppercase tracking-[0.08em] ${
+                  isDark ? "text-zinc-500" : "text-zinc-400"
+                }`}
+              >
+                Model
+              </span>
+              <select
+                value={activeModel}
+                disabled={saving !== null || storedModel === undefined}
+                onChange={(e) =>
+                  savePatch(`${modelKey}:${e.target.value}`, {
+                    runtime,
+                    model: e.target.value,
+                  })
+                }
+                className={`w-full rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 ${inputBg}`}
+              >
+                {activeModelOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1">
+              <span
+                className={`text-[10px] font-medium uppercase tracking-[0.08em] ${
+                  isDark ? "text-zinc-500" : "text-zinc-400"
+                }`}
+              >
+                Reasoning effort
+              </span>
+              <select
+                value={reasoningEffort}
+                disabled={
+                  runtime !== "codex" ||
+                  saving !== null ||
+                  storedHostedEffort === undefined
+                }
+                onChange={(e) =>
+                  savePatch(`codex_reasoning_effort:${e.target.value}`, {
+                    runtime: "codex",
+                    reasoningEffort: e.target.value as ReasoningEffort,
+                  })
+                }
+                className={`w-full rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 disabled:opacity-50 ${inputBg}`}
+              >
+                {CODEX_REASONING_EFFORTS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {error && <div className="text-[11px] text-rose-400">{error}</div>}
+        </div>
+      }
+    />
   );
 }
 
@@ -181,20 +663,20 @@ function ToggleRow({
           role="switch"
           aria-checked={enabled}
           aria-label={`Toggle ${setting.label}`}
-          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+          className={`toggle-switch relative inline-flex h-6 w-11 items-center rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 ${
             loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
           } ${
             enabled
               ? isDark
-                ? "bg-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-slate-950"
+                ? "bg-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-[#202024]"
                 : "bg-emerald-500 focus:ring-emerald-500/50 focus:ring-offset-white"
               : isDark
-                ? "bg-slate-700 focus:ring-slate-500/50 focus:ring-offset-slate-950"
-                : "bg-slate-300 focus:ring-slate-400/50 focus:ring-offset-white"
+                ? "bg-zinc-700 focus:ring-zinc-500/50 focus:ring-offset-[#202024]"
+                : "bg-zinc-300 focus:ring-zinc-400/50 focus:ring-offset-white"
           }`}
         >
           <span
-            className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+            className={`toggle-thumb inline-block h-5 w-5 transform rounded-full bg-white shadow ${
               enabled ? "translate-x-5" : "translate-x-0.5"
             }`}
           />
@@ -292,14 +774,14 @@ function TimezoneRow({
   }${now ? ` · now: ${now}` : ""}`;
 
   const inputBg = isDark
-    ? "bg-slate-900 border-slate-700 text-slate-200 placeholder:text-slate-600"
-    : "bg-white border-slate-300 text-slate-800 placeholder:text-slate-400";
+    ? "bg-[#17171a] border-white/10 text-zinc-100 placeholder:text-zinc-600"
+    : "bg-zinc-50 border-zinc-200 text-zinc-900 placeholder:text-zinc-400";
   const btnBg = isDark
-    ? "bg-sky-600 hover:bg-sky-500 text-white"
-    : "bg-sky-600 hover:bg-sky-500 text-white";
+    ? "bg-zinc-100 text-zinc-950 hover:bg-white"
+    : "bg-zinc-950 text-white hover:bg-zinc-800";
   const clearBtnBg = isDark
-    ? "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
-    : "text-slate-500 hover:text-slate-700 hover:bg-slate-100";
+    ? "text-zinc-500 hover:bg-white/5 hover:text-zinc-200"
+    : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800";
 
   return (
     <SettingShell
@@ -308,7 +790,7 @@ function TimezoneRow({
       debugLine={debugLine}
       isDark={isDark}
       control={
-        <div className="flex flex-col items-end gap-2 min-w-[260px]">
+        <div className="flex w-full flex-col items-end gap-2 lg:min-w-[380px]">
           <div className="flex items-center gap-2 w-full">
             <select
               value={
@@ -316,9 +798,9 @@ function TimezoneRow({
               }
               onChange={(e) => setDraft(e.target.value)}
               disabled={saving || loading}
-              className={`text-xs px-2 py-1.5 border rounded-md flex-1 ${inputBg}`}
+              className={`flex-1 rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 ${inputBg}`}
             >
-              <option value="">— pick a common zone —</option>
+              <option value="">Pick a common zone</option>
               {COMMON_TIMEZONES.map((t) => (
                 <option key={t.value} value={t.value}>
                   {t.label}
@@ -333,12 +815,12 @@ function TimezoneRow({
               onChange={(e) => setDraft(e.target.value)}
               placeholder="or paste IANA ID e.g. America/Chicago"
               disabled={saving || loading}
-              className={`text-xs px-2 py-1.5 border rounded-md flex-1 mono ${inputBg}`}
+              className={`min-w-0 flex-1 rounded-xl border px-3 py-2 text-xs outline-none transition-colors focus:border-zinc-400 mono ${inputBg}`}
             />
             <button
               onClick={() => save(draft)}
               disabled={saving || loading || draft.trim() === (stored ?? "")}
-              className={`text-xs px-3 py-1.5 rounded-md disabled:opacity-50 ${btnBg}`}
+              className={`rounded-xl px-3 py-2 text-xs font-medium disabled:opacity-50 ${btnBg}`}
             >
               {saving ? "Saving…" : "Save"}
             </button>
@@ -347,7 +829,7 @@ function TimezoneRow({
             <button
               onClick={clear}
               disabled={saving || loading}
-              className={`text-[11px] px-2 py-1 rounded-md ${clearBtnBg}`}
+              className={`rounded-xl px-2.5 py-1.5 text-[11px] ${clearBtnBg}`}
             >
               Reset to server default
             </button>

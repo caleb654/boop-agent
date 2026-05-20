@@ -9,9 +9,12 @@ export default defineSchema({
     agentId: v.optional(v.string()),
     turnId: v.optional(v.string()),
     createdAt: v.number(),
+    imageStorageIds: v.optional(v.array(v.id("_storage"))),
+    mediaError: v.optional(v.string()),
   })
     .index("by_conversation", ["conversationId"])
-    .index("by_conversation_turn", ["conversationId", "turnId"]),
+    .index("by_conversation_turn", ["conversationId", "turnId"])
+    .index("by_createdAt", ["createdAt"]),
 
   conversations: defineTable({
     conversationId: v.string(),
@@ -48,6 +51,7 @@ export default defineSchema({
     // schema churn.
     metadata: v.optional(v.string()),
     createdAt: v.number(),
+    imageStorageIds: v.optional(v.array(v.id("_storage"))),
   })
     .index("by_memory_id", ["memoryId"])
     .index("by_tier", ["tier"])
@@ -64,6 +68,10 @@ export default defineSchema({
     conversationId: v.optional(v.string()),
     name: v.string(),
     task: v.string(),
+    runtime: v.optional(v.union(v.literal("claude"), v.literal("codex"))),
+    model: v.optional(v.string()),
+    reasoningEffort: v.optional(v.string()),
+    billingMode: v.optional(v.union(v.literal("api"), v.literal("codex-subscription"))),
     status: v.union(
       v.literal("spawned"),
       v.literal("running"),
@@ -104,6 +112,8 @@ export default defineSchema({
     turnId: v.optional(v.string()),
     agentId: v.optional(v.string()),
     runId: v.optional(v.string()),
+    runtime: v.optional(v.union(v.literal("claude"), v.literal("codex"))),
+    billingMode: v.optional(v.union(v.literal("api"), v.literal("codex-subscription"))),
     model: v.string(),
     inputTokens: v.number(),
     outputTokens: v.number(),

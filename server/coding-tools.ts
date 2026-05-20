@@ -1,4 +1,3 @@
-import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { api } from "../convex/_generated/api.js";
 import {
@@ -10,6 +9,11 @@ import {
   type CodingAgentKind,
 } from "./coding-agent.js";
 import { convex } from "./convex-client.js";
+import { createClaudeMcpServer } from "./runtimes/claude.js";
+import { defineRuntimeTool } from "./runtimes/tool.js";
+import { runtimeText, type RuntimeTool } from "./runtimes/types.js";
+
+const NAMESPACE = "boop-coding";
 
 function fmtAgo(ms: number): string {
   const d = Math.max(0, Math.floor((Date.now() - ms) / 1000));
@@ -19,12 +23,10 @@ function fmtAgo(ms: number): string {
   return `${Math.floor(d / 86400)}d`;
 }
 
-export function createCodingMcp(conversationId: string) {
-  return createSdkMcpServer({
-    name: "boop-coding",
-    version: "0.1.0",
-    tools: [
-      tool(
+export function createCodingTools(conversationId: string): RuntimeTool[] {
+  return [
+      defineRuntimeTool(
+        NAMESPACE,
         "spawn_coder",
         `Kick off a real local CLI coding agent inside a project directory. Defaults to Claude Code; use Codex when the user explicitly asks for Codex. Asynchronous - the coder runs in the background and the user gets an iMessage when it finishes.
 
@@ -71,18 +73,14 @@ This tool returns IMMEDIATELY with an "agent <id> started" message. Do not prete
             agent: args.agent,
           });
           const agent = args.agent ?? "claude";
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `${agent} coder started in ${projectAbs}. The user will get a follow-up iMessage when it finishes.`,
-              },
-            ],
-          };
+          return runtimeText(
+            `${agent} coder started in ${projectAbs}. The user will get a follow-up iMessage when it finishes.`,
+          );
         },
       ),
 
-      tool(
+      defineRuntimeTool(
+        NAMESPACE,
         "continue_coder",
         `Send a follow-up task to the most recent coder session. Use this when the user wants to iterate on the last programming/project task through iMessage without naming the project again.
 
@@ -101,14 +99,10 @@ This resumes the last persisted Claude/Codex session for its project, runs async
         async (args) => {
           const session = latestCoderSession(args.agent as CodingAgentKind | undefined);
           if (!session) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: "No prior coder session found. Ask for a project or use spawn_coder first.",
-                },
-              ],
-            };
+            return runtimeText(
+              "No prior coder session found. Ask for a project or use spawn_coder first.",
+              false,
+            );
           }
           runCoderInBackground({
             project: session.projectPath,
@@ -117,40 +111,33 @@ This resumes the last persisted Claude/Codex session for its project, runs async
             name: `code:${session.agent}:${session.projectPath.split("/").pop()}:followup`,
             agent: session.agent,
           });
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `${session.agent} coder follow-up started in ${session.projectPath}. The user will get a follow-up iMessage when it finishes.`,
-              },
-            ],
-          };
+          return runtimeText(
+            `${session.agent} coder follow-up started in ${session.projectPath}. The user will get a follow-up iMessage when it finishes.`,
+          );
         },
       ),
 
-      tool(
+      defineRuntimeTool(
+        NAMESPACE,
         "list_running_coders",
         "List all coder agents currently running in the background. Use when the user asks for status (e.g. 'where's that fix at?', 'what's still going?').",
         {},
         async () => {
           const coders = listRunningCoders();
           if (coders.length === 0) {
-            return {
-              content: [{ type: "text" as const, text: "No coders running." }],
-            };
+            return runtimeText("No coders running.");
           }
           const lines = coders.map((c) => {
             const taskPreview =
               c.task.length > 80 ? c.task.slice(0, 80) + "..." : c.task;
             return `- [${c.agentId}] ${c.agent} ${c.projectPath} - ${fmtAgo(c.startedAt)} - ${taskPreview}`;
           });
-          return {
-            content: [{ type: "text" as const, text: lines.join("\n") }],
-          };
+          return runtimeText(lines.join("\n"));
         },
       ),
 
-      tool(
+      defineRuntimeTool(
+        NAMESPACE,
         "list_recent_coders",
         "List recent coder runs, including completed, failed, and cancelled runs. Use before answering status/failure questions like 'did it fail?', 'what happened?', 'why did that cancel?', or 'is it done?'.",
         { limit: z.number().optional().describe("Maximum recent coder runs to return. Default 8.") },
@@ -160,37 +147,33 @@ This resumes the last persisted Claude/Codex session for its project, runs async
             .filter((a) => a.mcpServers.some((server) => server.startsWith("coding:")))
             .slice(0, args.limit ?? 8);
           if (coders.length === 0) {
-            return {
-              content: [{ type: "text" as const, text: "No recent coder runs found." }],
-            };
+            return runtimeText("No recent coder runs found.");
           }
           const lines = coders.map((a) => {
             const taskPreview = a.task.length > 90 ? a.task.slice(0, 90) + "..." : a.task;
             const error = a.error ? ` error=${a.error.slice(0, 140)}` : "";
             return `- [${a.agentId}] ${a.status} ${a.name} - ${fmtAgo(a.startedAt)} ago - ${taskPreview}${error}`;
           });
-          return {
-            content: [{ type: "text" as const, text: lines.join("\n") }],
-          };
+          return runtimeText(lines.join("\n"));
         },
       ),
 
-      tool(
+      defineRuntimeTool(
+        NAMESPACE,
         "cancel_coder",
         "Abort a running coder by id. Use when the user says to stop or cancel a specific coding task.",
         { agentId: z.string() },
         async (args) => {
           const ok = cancelCodingAgent(args.agentId);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: ok ? `Cancelled ${args.agentId}.` : `No running coder with id ${args.agentId}.`,
-              },
-            ],
-          };
+          return runtimeText(
+            ok ? `Cancelled ${args.agentId}.` : `No running coder with id ${args.agentId}.`,
+            ok,
+          );
         },
       ),
-    ],
-  });
+    ];
+}
+
+export function createCodingMcp(conversationId: string) {
+  return createClaudeMcpServer(NAMESPACE, createCodingTools(conversationId));
 }

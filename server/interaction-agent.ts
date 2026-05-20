@@ -1,19 +1,30 @@
-import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
-import { createMemoryMcp } from "./memory/tools.js";
+import { createMemoryTools } from "./memory/tools.js";
 import { extractAndStore } from "./memory/extract.js";
-import { availableIntegrations, spawnExecutionAgent } from "./execution-agent.js";
-import { createAutomationMcp } from "./automation-tools.js";
-import { createCodingMcp } from "./coding-tools.js";
-import { createDraftDecisionMcp } from "./draft-tools.js";
-import { createImessageMcp } from "./imessage-tools.js";
-import { createSelfMcp } from "./self-tools.js";
-import { getRuntimeModel } from "./runtime-config.js";
+import { spawnExecutionAgent } from "./execution-agent.js";
+import { listEnabledIntegrations } from "./integrations/registry.js";
+import { createAutomationTools } from "./automation-tools.js";
+import { createCodingTools } from "./coding-tools.js";
+import { createDraftDecisionTools } from "./draft-tools.js";
+import { createImessageTools } from "./imessage-tools.js";
+import { createSelfTools } from "./self-tools.js";
+import {
+  getRuntimeConfig,
+  resolveRuntimeInput,
+  setRuntimeProvider,
+} from "./runtime-config.js";
 import { broadcast } from "./broadcast.js";
 import { sendImessage } from "./sendblue.js";
-import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
+import { defineRuntimeTool } from "./runtimes/tool.js";
+import { runAgentRuntime } from "./runtimes/index.js";
+import { runtimeText } from "./runtimes/types.js";
+import { EMPTY_USAGE, type UsageTotals } from "./usage.js";
+import {
+  buildPromptWithImagesOrTextFallback,
+  fetchStoredBytes,
+} from "./images/content-blocks.js";
 import { askAtgExec } from "./integrations/atg-exec.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
@@ -33,7 +44,7 @@ Your only tools:
 - recent_messages_from_contact (reads recent local iMessage/SMS history for a named contact through the imsg CLI)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
-- get_config / set_model / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
+- get_config / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 
 You cannot answer factual questions from your own knowledge. Not allowed.
 You have NO browser, NO WebSearch, NO WebFetch, NO file access, NO APIs.
@@ -46,6 +57,10 @@ recommendation that requires real-world data, a current event, a comparison,
 a tutorial, a how-to, any URL, or anything you'd be tempted to "just know" —
 spawn_agent. No exceptions. Even if you're 99% sure. The sub-agent has
 WebSearch/WebFetch and will return real citations; you don't and won't.
+Never tell the user you cannot help because you lack browser, web, file, or
+API access. That lack of access is the signal to call send_ack, then
+spawn_agent. Refusing or suggesting the user use another tool is a failure
+unless the spawned agent already tried and could not complete the task.
 
 Acknowledgment rule (iMessage UX):
 BEFORE every spawn_agent call, you MUST call send_ack first with a short
@@ -139,11 +154,25 @@ with a specific integration, spawn_agent against it — the sub-agent has
 COMPOSIO_SEARCH_TOOLS and will return the real tool list. Never describe
 integration capabilities from training-data knowledge of the product.
 
+Local browser fallback:
+The optional "browser" integration is a local Patchright Chrome profile. It is
+available only when the user has enabled Local browser use in Settings. Force
+["browser"] only for explicit local-browser intent: "local browser", "local
+Chrome", "Patchright", "browser integration", "Chrome instance", or a
+browser/Chrome request combined with "not Composio" / "not native integration".
+If "browser" is not available, tell the user to turn on Local browser use in
+Settings. Otherwise, prefer native integrations when they fit. Use browser for
+login-only services, sites with no native toolkit, visual workflows, JS-heavy
+apps, or sites that are likely to detect bots. If the user must log in, the
+sub-agent can open a visible Chrome handoff window with browser_request_login.
+
 Self-inspection (no spawn needed — answer instantly):
 When the user asks about Boop itself, pick the tool by intent:
 - Wants to know what model / config / time is currently in effect → get_config
+- Wants to switch providers/runtimes (Claude vs Codex) → set_runtime
 - Wants to switch models or change speed/quality tradeoff → set_model
   (takes effect next turn; this turn finishes on the current model)
+- Wants to tune Codex depth/speed specifically → set_codex_reasoning_effort
 - Wants to know which integrations or accounts are connected → list_integrations
 - Wondering whether some service is connectable at all → search_composio_catalog
 - Probing the actual capabilities of a specific connected integration
@@ -177,18 +206,28 @@ Coding (spawn_coder):
 - Do NOT use generic spawn_agent for repo work unless the task is mainly external research/account work with no local code changes.
 - Pass "project" (bare name resolves to ~/Programming/<name>, or absolute path) and a crisp task.
 - Default to agent="claude". Use agent="codex" only when the user explicitly asks for Codex ("use codex", "do this with codex", etc.).
-- spawn_coder runs ASYNC. It returns immediately. The coder works in the background and the user receives a follow-up iMessage like "[coder done - <project>]..." when it finishes. Tell the user you've kicked it off; do NOT pretend the work is done.
-- The coder has full project-local CLI power. Claude Code sessions start with remote control enabled when supported; completion messages include a resume command so the user can jump in directly.
-- For follow-up iteration on the last programming/project task, use continue_coder instead of asking for the project again. Examples: "also make it show the date", "that didn't work", "have it fix the test", "can you tweak the button", "now wire up OpenAI", "why did it do local", "force re-embed", "keep going", "ship that with Codex". It resumes the most recent coder session and texts the user when done.
+- spawn_coder runs ASYNC. It returns immediately. The coder works in the background and the user receives a follow-up iMessage when it finishes. Tell the user you've kicked it off; do NOT pretend the work is done.
+- For follow-up iteration on the last programming/project task, use continue_coder instead of asking for the project again.
 - For status questions ("where's that fix at?", "what's still running?") use list_running_coders.
 - For outcome/failure questions ("did it fail?", "is it done?", "why did it cancel?", "what happened?"), call list_recent_coders before answering. Do not guess from conversation context and do not start a new coder unless the user asks to retry or continue.
 - For "cancel that" use cancel_coder with the agentId from list_running_coders.
-- If a recent turn in this conversation listed image attachment paths (e.g. under /Users/.../Library/Messages/Attachments/), include those absolute paths verbatim in the task string you pass to spawn_coder. The coder's Read tool can open PNG/JPEG/HEIC and the images often carry the actual context the sender meant to convey.
 
 iMessage lookup:
 - When the user explicitly asks to look at, inspect, summarize, or use recent texts/iMessages from a named person, call recent_messages_from_contact. Do not ask for a phone number first; names like "Isaac" resolve through imsg chat metadata.
 - This is for local Messages history only. Do not use it for generic facts about a person or for contacting them.
 - If the returned messages include attachment paths and the user wants coding/design work based on them, pass those absolute paths to spawn_coder or continue_coder.
+
+Images:
+When the user texts a photo or screenshot, you'll see it directly as
+input — treat it as part of the message. Describe it, answer questions
+about it, or extract info from it the same way you'd handle text. Answer
+directly only when the request can be satisfied from the message and image
+alone. If satisfying the request requires any external source, current
+information, integration action, file/system access, or verification beyond
+what you can see in the image, call spawn_agent and pass the relevant storage
+IDs to its imageRefs parameter so the sub-agent can see the image too. If the
+user sends a photo with no caption, ask a short clarifying question rather
+than guessing what they want.
 
 Format: Plain iMessage-friendly text. Markdown sparingly. Keep replies under ~400 chars when you can.`;
 
@@ -201,105 +240,221 @@ interface HandleOpts {
   // role=user, so the synthetic notice the IA receives doesn't pollute the
   // user-message history. Defaults to "user".
   kind?: "user" | "proactive";
+  // The Sendblue/proactive callers persist the delivered final message after
+  // transport succeeds. Local chat callers still need the assistant turn in
+  // Convex so conversation views reflect the full exchange.
+  persistAssistantReply?: boolean;
+  images?: Array<{ storageId: string; mediaType: string }>;
+  mediaError?: string;
 }
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export async function handleUserMessage(opts: HandleOpts): Promise<string> {
-  // Deterministic /clear short-circuit. Exact match (trim + case-insensitive)
-  // on "clear" wipes conversation history before any LLM call. Does NOT touch
-  // memory or coding sessions — only the per-turn message history.
-  // Returns the reply string and lets the webhook handler send/persist it.
-  if (opts.content.trim().toLowerCase() === "clear") {
-    const deleted = await convex.mutation(api.messages.clearConversation, {
-      conversationId: opts.conversationId,
-    });
-    broadcast("conversation_cleared", {
-      conversationId: opts.conversationId,
-      deleted,
-    });
-    return `Cleared ${deleted} message${deleted === 1 ? "" : "s"}. Fresh start. (Memory kept.)`;
-  }
+function runtimeLabel(runtime: "claude" | "codex"): string {
+  return runtime === "codex" ? "Codex" : "Claude";
+}
 
+export function resolveDirectRuntimeSwitch(content: string): "claude" | "codex" | null {
+  const normalized = content
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/g, "")
+    .replace(/\s+/g, " ");
+  const match = normalized.match(
+    /^(?:please |pls |can you )?(?:switch|change|set|use|move|flip)(?: me| boop)?(?: (?:runtime|provider))?(?: back| over)?(?: to)? (?<runtime>claude agent sdk|chatgpt codex|anthropic|claude|codex|chatgpt)(?: runtime| provider)?(?: for (?:the )?next turn)?(?: please)?$/,
+  );
+  if (!match?.groups?.runtime) return null;
+  return resolveRuntimeInput(match.groups.runtime);
+}
+
+export function resolveSpawnImageRefs(
+  requestedRefs: string[] | undefined,
+  inboundImageStorageIds: string[],
+): string[] | undefined {
+  if (inboundImageStorageIds.length === 0) return undefined;
+  const selected = requestedRefs?.filter((id) =>
+    inboundImageStorageIds.includes(id),
+  );
+  return selected && selected.length > 0 ? selected : inboundImageStorageIds;
+}
+
+function explicitlyRequestsBrowser(content: string): boolean {
+  const normalized = content.toLowerCase().replace(/\s+/g, " ");
+  const directBrowserIntent =
+    /\blocal browser\b/.test(normalized) ||
+    /\blocal chrome\b/.test(normalized) ||
+    /\bpatchright\b/.test(normalized) ||
+    /\bbrowser integration\b/.test(normalized) ||
+    /\bchrome instance\b/.test(normalized) ||
+    /\bbrowser instance\b/.test(normalized) ||
+    /\bchrome on (?:my|your|the user'?s) machine\b/.test(normalized) ||
+    /\bbrowser on (?:my|your|the user'?s) machine\b/.test(normalized) ||
+    /\bspawn (?:a |the )?(?:chrome|browser)\b/.test(normalized);
+  const antiNative =
+    /\b(?:not|without|don'?t use|do not use) composio\b/.test(normalized) ||
+    /\b(?:not|without|don'?t use|do not use) (?:the )?(?:native |api )?integrations?\b/.test(
+      normalized,
+    );
+  const browserMention = /\b(?:browser|chrome)\b/.test(normalized);
+  return directBrowserIntent || (antiNative && browserMention);
+}
+
+export function resolveSpawnIntegrations(
+  requested: string[],
+  available: string[],
+  content: string,
+): string[] {
+  if (available.includes("browser") && explicitlyRequestsBrowser(content)) {
+    return ["browser"];
+  }
+  return requested;
+}
+
+export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   const turnId = randomId("turn");
-  const integrations = availableIntegrations();
+  const integrations = (await listEnabledIntegrations()).map((i) => i.name);
 
   const inboundRole = opts.kind === "proactive" ? "system" : "user";
+  const inboundImageStorageIds = (opts.images ?? []).map((i) => i.storageId);
   await convex.mutation(api.messages.send, {
     conversationId: opts.conversationId,
     role: inboundRole,
     content: opts.content,
     turnId,
+    // TODO(codegen): drop cast once schema push regenerates Convex API.
+    imageStorageIds: inboundImageStorageIds.length > 0
+      ? (inboundImageStorageIds as never)
+      : undefined,
+    mediaError: opts.mediaError,
   });
   broadcast(opts.kind === "proactive" ? "proactive_notice" : "user_message", {
     conversationId: opts.conversationId,
     content: opts.content,
   });
 
-  const memoryServer = createMemoryMcp(opts.conversationId);
-  const automationServer = createAutomationMcp(opts.conversationId);
-  const codingServer = createCodingMcp(opts.conversationId);
-  const draftDecisionServer = createDraftDecisionMcp(opts.conversationId);
-  const imessageServer = createImessageMcp();
-  const selfServer = createSelfMcp();
+  const history =
+    opts.kind === "proactive"
+      ? []
+      : await convex.query(api.messages.recent, {
+          conversationId: opts.conversationId,
+          limit: 10,
+        });
+  const historyBlock = history
+    .slice(0, -1)
+    .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+    .join("\n");
 
-  const ackServer = createSdkMcpServer({
-    name: "boop-ack",
-    version: "0.1.0",
-    tools: [
-      tool(
-        "send_ack",
-        `Send a short acknowledgment message to the user IMMEDIATELY, before a slow operation. Use this BEFORE spawn_agent so the user knows you heard them and are working on it. Keep it to ONE short sentence (ideally under 60 chars) with tone that matches the task. Examples: "On it — one sec 🔍", "Looking into it…", "Drafting now, hold tight.", "Let me check your calendar."`,
-        {
-          message: z.string().describe("1 short sentence ack. No markdown. Emojis OK."),
-        },
-        async (args) => {
-          const text = args.message.trim();
-          if (!text) {
-            return {
-              content: [{ type: "text" as const, text: "Empty ack skipped." }],
-            };
-          }
-          // Skip the iMessage send for proactive turns — those go out as a
-          // single self-contained notice from dispatchProactiveNotice. If the
-          // IA calls send_ack here on a proactive turn, the user would get
-          // two iMessages (the ack + the final reply). Still persist + log
-          // so the debug UI sees it.
-          if (opts.conversationId.startsWith("sms:") && opts.kind !== "proactive") {
-            const number = opts.conversationId.slice(4);
-            await sendImessage(number, text);
-          }
-          await convex.mutation(api.messages.send, {
-            conversationId: opts.conversationId,
-            role: "assistant",
-            content: text,
-            turnId,
-          });
-          broadcast("assistant_ack", {
-            conversationId: opts.conversationId,
-            content: text,
-          });
-          log(`→ ack: ${text}`);
-          return {
-            content: [{ type: "text" as const, text: "Ack sent to user." }],
-          };
-        },
-      ),
-    ],
-  });
+  const systemPrompt = INTERACTION_SYSTEM.replace(
+    "{{INTEGRATIONS}}",
+    integrations.join(", ") || "(no integrations configured yet)",
+  );
 
-  // Direct ATG access at the interaction-agent layer. Skipping the sub-agent
-  // for ATG questions cuts ~5–10s off the round trip — the IA itself can call
-  // exec-chat's /api/ask, then pass the image marker straight through to the
-  // user. Only registered when ATG_EXEC_SECRET is set.
-  const atgServer = process.env.ATG_EXEC_SECRET
-    ? createSdkMcpServer({
-        name: "boop-atg",
-        version: "0.1.0",
-        tools: [
-          tool(
+  const userText = opts.mediaError
+    ? `[user sent images but they couldn't be downloaded: ${opts.mediaError}]\n${opts.content}`
+    : opts.content;
+  const promptText =
+    opts.kind === "proactive"
+      ? `Standalone proactive notice. Write a concise user-facing iMessage from this notice only. Do not research, spawn agents, or continue any prior conversation.\n\n${userText}`
+      : historyBlock
+        ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${userText}`
+        : userText;
+
+  const tag = opts.turnTag ?? turnId.slice(-6);
+  const log = (msg: string) => console.log(`[turn ${tag}] ${msg}`);
+
+  const turnStart = Date.now();
+  // Snapshot runtime for this top-level turn so same-turn set_runtime/set_model
+  // changes do not split the dispatcher and any spawned execution agent.
+  const runtimeConfig = await getRuntimeConfig();
+  const directRuntimeSwitch =
+    opts.kind === "proactive" ? null : resolveDirectRuntimeSwitch(opts.content);
+  if (directRuntimeSwitch) {
+    await setRuntimeProvider(directRuntimeSwitch);
+    const nextConfig = await getRuntimeConfig();
+    const label = runtimeLabel(directRuntimeSwitch);
+    const reply =
+      runtimeConfig.runtime === directRuntimeSwitch
+        ? `Already on ${label}. Next turn will use ${nextConfig.model}.`
+        : `Switched to ${label}. Next turn will use ${nextConfig.model}.`;
+    log(`runtime switch: ${runtimeConfig.runtime} -> ${directRuntimeSwitch}`);
+    broadcast("assistant_message", { conversationId: opts.conversationId, content: reply });
+    if (opts.persistAssistantReply) {
+      await convex.mutation(api.messages.send, {
+        conversationId: opts.conversationId,
+        role: "assistant",
+        content: reply,
+        turnId,
+      });
+    }
+    return reply;
+  }
+
+  if (
+    opts.kind !== "proactive" &&
+    explicitlyRequestsBrowser(opts.content) &&
+    !integrations.includes("browser")
+  ) {
+    const reply =
+      "Local browser use is off right now. Turn it on in Settings → Local browser use, then resend this and I can use Chrome on your machine.";
+    log("browser requested but disabled");
+    broadcast("assistant_message", { conversationId: opts.conversationId, content: reply });
+    if (opts.persistAssistantReply) {
+      await convex.mutation(api.messages.send, {
+        conversationId: opts.conversationId,
+        role: "assistant",
+        content: reply,
+        turnId,
+      });
+    }
+    return reply;
+  }
+
+  const sendAck = async (message: string): Promise<void> => {
+    const text = message.trim();
+    if (!text) return;
+    if (opts.conversationId.startsWith("sms:") && opts.kind !== "proactive") {
+      const number = opts.conversationId.slice(4);
+      await sendImessage(number, text);
+    }
+    await convex.mutation(api.messages.send, {
+      conversationId: opts.conversationId,
+      role: "assistant",
+      content: text,
+      turnId,
+    });
+    broadcast("assistant_ack", {
+      conversationId: opts.conversationId,
+      content: text,
+    });
+    log(`→ ack: ${text}`);
+  };
+
+  const promptBuild =
+    opts.kind === "proactive"
+      ? { prompt: promptText, imageStorageIds: [] }
+      : await buildPromptWithImagesOrTextFallback({
+          text: promptText,
+          imageStorageIds: inboundImageStorageIds,
+          fetchBytes: fetchStoredBytes,
+        });
+  if (promptBuild.imageError) {
+    log(`image fetch fallback: ${promptBuild.imageError}`);
+  }
+  const spawnableImageStorageIds = promptBuild.imageStorageIds;
+
+  const tools = [
+    ...createMemoryTools(opts.conversationId),
+    ...createAutomationTools(opts.conversationId),
+    ...createCodingTools(opts.conversationId),
+    ...createDraftDecisionTools(opts.conversationId, runtimeConfig),
+    ...createImessageTools(),
+    ...createSelfTools(),
+    ...(process.env.ATG_EXEC_SECRET
+      ? [
+          defineRuntimeTool(
+            "boop-atg",
             "ask_atg",
             [
               "Ask ATG Exec Chat (Caleb's ATG business assistant) a natural-language question. Read-only",
@@ -335,160 +490,143 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               if (result.imagePath) {
                 lines.push("", `[ATG_IMAGE:${result.imagePath}]`);
               }
-              return {
-                content: [{ type: "text" as const, text: lines.join("\n") }],
-              };
+              return runtimeText(lines.join("\n"));
             },
           ),
-        ],
-      })
-    : null;
-
-  const spawnServer = createSdkMcpServer({
-    name: "boop-spawn",
-    version: "0.1.0",
-    tools: [
-      tool(
-        "spawn_agent",
-        "Spawn a focused sub-agent to do real work using external tools. Returns the agent's final answer. Use for anything requiring lookups, drafting, or actions in the user's integrations.",
-        {
-          task: z
-            .string()
-            .describe("Crisp task description — what to find/draft/do, not the raw user message."),
-          integrations: z
-            .array(z.string())
-            .describe(`Which integrations to give the agent. Available: ${integrations.join(", ") || "(none)"}`),
-          name: z.string().optional().describe("Short label for the agent."),
-        },
-        async (args) => {
-          const res = await spawnExecutionAgent({
-            task: args.task,
-            integrations: args.integrations,
-            conversationId: opts.conversationId,
-            name: args.name,
-          });
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `[agent ${res.agentId} ${res.status}]\n\n${res.result}`,
-              },
-            ],
-          };
-        },
-      ),
-    ],
-  });
-
-  const history = await convex.query(api.messages.recent, {
-    conversationId: opts.conversationId,
-    limit: 10,
-  });
-  const historyBlock = history
-    .slice(0, -1)
-    .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
-    .join("\n");
-
-  const systemPrompt = INTERACTION_SYSTEM.replace(
-    "{{INTEGRATIONS}}",
-    integrations.join(", ") || "(no integrations configured yet)",
-  );
-
-  const prompt = historyBlock
-    ? `Prior turns:\n${historyBlock}\n\nCurrent message:\n${opts.content}`
-    : opts.content;
-
-  const tag = opts.turnTag ?? turnId.slice(-6);
-  const log = (msg: string) => console.log(`[turn ${tag}] ${msg}`);
-
-  const turnStart = Date.now();
-  const requestedModel = await getRuntimeModel();
+        ]
+      : []),
+    defineRuntimeTool(
+      "boop-ack",
+      "send_ack",
+      `Send a short acknowledgment message to the user IMMEDIATELY, before a slow operation. Use this BEFORE spawn_agent so the user knows you heard them and are working on it. Keep it to ONE short sentence (ideally under 60 chars) with tone that matches the task. Examples: "On it — one sec 🔍", "Looking into it…", "Drafting now, hold tight.", "Let me check your calendar."`,
+      {
+        message: z.string().describe("1 short sentence ack. No markdown. Emojis OK."),
+      },
+      async (args) => {
+        const text = args.message.trim();
+        if (!text) return runtimeText("Empty ack skipped.");
+        await sendAck(text);
+        return runtimeText("Ack sent to user.");
+      },
+    ),
+    defineRuntimeTool(
+      "boop-spawn",
+      "spawn_agent",
+      "Spawn a focused sub-agent to do real work using external tools. Returns the agent's final answer. Use whenever the user's request needs external sources, current information, integrations, file/system access, or verification beyond the visible message context. If the current user message includes images and the sub-agent's task depends on them, pass the relevant storage IDs in imageRefs. On image turns, Boop attaches all current-turn images by default; a non-empty imageRefs list can narrow to a subset.",
+      {
+        task: z
+          .string()
+          .describe("Crisp task description — what to find/draft/do, not the raw user message."),
+        integrations: z
+          .array(z.string())
+          .describe(`Which integrations to give the agent. Available: ${integrations.join(", ") || "(none)"}`),
+        name: z.string().optional().describe("Short label for the agent."),
+        imageRefs: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Convex storage IDs from the user's current message. Available in this turn: " +
+              (spawnableImageStorageIds.length > 0
+                ? spawnableImageStorageIds.join(", ")
+                : "(none)"),
+          ),
+      },
+      async (args) => {
+        const imageStorageIds = resolveSpawnImageRefs(
+          args.imageRefs,
+          spawnableImageStorageIds,
+        );
+        const selectedIntegrations = resolveSpawnIntegrations(
+          args.integrations,
+          integrations,
+          opts.content,
+        ).filter((name) => integrations.includes(name));
+        const browserForced =
+          selectedIntegrations.length === 1 &&
+          selectedIntegrations[0] === "browser" &&
+          !args.integrations.includes("browser");
+        if (browserForced) {
+          log(
+            `forcing browser integration for explicit browser request (model requested: ${args.integrations.join(",") || "none"})`,
+          );
+        }
+        const res = await spawnExecutionAgent({
+          task: args.task,
+          integrations: selectedIntegrations,
+          conversationId: opts.conversationId,
+          name: args.name,
+          runtimeConfig,
+          imageStorageIds,
+        });
+        return runtimeText(`[agent ${res.agentId} ${res.status}]\n\n${res.result}`);
+      },
+    ),
+  ];
   let reply = "";
   let usage: UsageTotals = { ...EMPTY_USAGE };
   try {
-    for await (const msg of query({
-      prompt,
-      options: {
-        systemPrompt,
-        model: requestedModel,
-        mcpServers: {
-          "boop-memory": memoryServer,
-          "boop-spawn": spawnServer,
-          "boop-automations": automationServer,
-          "boop-coding": codingServer,
-          "boop-draft-decisions": draftDecisionServer,
-          "boop-imessage": imessageServer,
-          "boop-ack": ackServer,
-          "boop-self": selfServer,
-          ...(atgServer ? { "boop-atg": atgServer } : {}),
-        },
-        allowedTools: [
-          "mcp__boop-memory__write_memory",
-          "mcp__boop-memory__recall",
-          "mcp__boop-spawn__spawn_agent",
-          "mcp__boop-coding__spawn_coder",
-          "mcp__boop-coding__continue_coder",
-          "mcp__boop-coding__list_running_coders",
-          "mcp__boop-coding__list_recent_coders",
-          "mcp__boop-coding__cancel_coder",
-          "mcp__boop-automations__create_automation",
-          "mcp__boop-automations__list_automations",
-          "mcp__boop-automations__toggle_automation",
-          "mcp__boop-automations__delete_automation",
-          "mcp__boop-draft-decisions__list_drafts",
-          "mcp__boop-draft-decisions__send_draft",
-          "mcp__boop-draft-decisions__reject_draft",
-          "mcp__boop-imessage__recent_messages_from_contact",
-          "mcp__boop-ack__send_ack",
-          "mcp__boop-self__get_config",
-          "mcp__boop-self__set_model",
-          "mcp__boop-self__set_timezone",
-          "mcp__boop-self__list_integrations",
-          "mcp__boop-self__search_composio_catalog",
-          "mcp__boop-self__inspect_toolkit",
-          "mcp__boop-atg__ask_atg",
-        ],
-        // Belt-and-suspenders: even with bypassPermissions the SDK can leak
-        // its built-ins if we only whitelist. Explicitly block them on the
-        // dispatcher so it MUST spawn a sub-agent for external work.
-        disallowedTools: [
-          "WebSearch",
-          "WebFetch",
-          "Bash",
-          "Read",
-          "Write",
-          "Edit",
-          "Glob",
-          "Grep",
-          "Agent",
-          "Skill",
-        ],
-        permissionMode: "bypassPermissions",
+    const result = await runAgentRuntime(runtimeConfig, {
+      prompt: promptBuild.prompt,
+      systemPrompt,
+      tools,
+      mode: "dispatcher",
+      allowedTools:
+        opts.kind === "proactive"
+          ? []
+          : [
+              "mcp__boop-memory__write_memory",
+              "mcp__boop-memory__recall",
+              "mcp__boop-spawn__spawn_agent",
+              "mcp__boop-coding__spawn_coder",
+              "mcp__boop-coding__continue_coder",
+              "mcp__boop-coding__list_running_coders",
+              "mcp__boop-coding__list_recent_coders",
+              "mcp__boop-coding__cancel_coder",
+              "mcp__boop-automations__create_automation",
+              "mcp__boop-automations__list_automations",
+              "mcp__boop-automations__toggle_automation",
+              "mcp__boop-automations__delete_automation",
+              "mcp__boop-draft-decisions__list_drafts",
+              "mcp__boop-draft-decisions__send_draft",
+              "mcp__boop-draft-decisions__reject_draft",
+              "mcp__boop-imessage__recent_messages_from_contact",
+              "mcp__boop-ack__send_ack",
+              "mcp__boop-self__get_config",
+              "mcp__boop-self__set_runtime",
+              "mcp__boop-self__set_model",
+              "mcp__boop-self__set_codex_reasoning_effort",
+              "mcp__boop-self__set_timezone",
+              "mcp__boop-self__list_integrations",
+              "mcp__boop-self__search_composio_catalog",
+              "mcp__boop-self__inspect_toolkit",
+              "mcp__boop-atg__ask_atg",
+            ],
+      // Belt-and-suspenders: even with bypassPermissions the SDK can leak
+      // its built-ins if we only whitelist. Explicitly block them on the
+      // dispatcher so it MUST spawn a sub-agent for external work.
+      disallowedTools: [
+        "WebSearch",
+        "WebFetch",
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Agent",
+        "Skill",
+      ],
+      onText: (chunk) => opts.onThinking?.(chunk),
+      onToolUse: (toolName, input) => {
+        const name = toolName.replace(/^mcp__boop-[a-z-]+__/, "");
+        const inputPreview = JSON.stringify(input);
+        log(
+          `tool: ${name}(${inputPreview.length > 90 ? inputPreview.slice(0, 90) + "…" : inputPreview})`,
+        );
       },
-    })) {
-      if (msg.type === "assistant") {
-        // Reset `reply` on each new assistant turn so only the LAST turn's
-        // text becomes the user-facing iMessage. Earlier turns are usually
-        // pre-tool-call narration ("Got it — saving that now.") that, if
-        // concatenated with the post-tool-result final text, sends as one
-        // smushed iMessage. Streaming via onThinking still sees everything.
-        reply = "";
-        for (const block of msg.message.content) {
-          if (block.type === "text") {
-            reply += block.text;
-            opts.onThinking?.(block.text);
-          } else if (block.type === "tool_use") {
-            const name = block.name.replace(/^mcp__boop-[a-z-]+__/, "");
-            const inputPreview = JSON.stringify(block.input);
-            log(
-              `tool: ${name}(${inputPreview.length > 90 ? inputPreview.slice(0, 90) + "…" : inputPreview})`,
-            );
-          }
-        }
-      } else if (msg.type === "result") {
-        usage = aggregateUsageFromResult(msg, requestedModel);
-      }
-    }
+    });
+    reply = result.text;
+    usage = result.usage;
   } catch (err) {
     console.error(`[turn ${tag}] query failed`, err);
     reply = "Sorry — I hit an error processing that. Try again in a moment.";
@@ -520,6 +658,8 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
       source: "dispatcher",
       conversationId: opts.conversationId,
       turnId,
+      runtime: runtimeConfig.runtime,
+      billingMode: runtimeConfig.billingMode,
       model: usage.model,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
@@ -531,6 +671,15 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   }
 
   broadcast("assistant_message", { conversationId: opts.conversationId, content: reply });
+
+  if (opts.persistAssistantReply) {
+    await convex.mutation(api.messages.send, {
+      conversationId: opts.conversationId,
+      role: "assistant",
+      content: reply,
+      turnId,
+    });
+  }
 
   // Background extraction — fire-and-forget; don't block the reply.
   // Skip on proactive turns: the "user message" is a synthetic
@@ -545,6 +694,8 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
       userMessage: opts.content,
       assistantReply: reply,
       turnId,
+      runtimeConfig,
+      imageStorageIds: inboundImageStorageIds,
     }).catch((err) => console.error("[interaction] extraction error", err));
   }
 
