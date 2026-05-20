@@ -33,6 +33,30 @@ export const send = mutation({
   },
 });
 
+export const clearConversation = mutation({
+  args: { conversationId: v.string() },
+  handler: async (ctx, args) => {
+    const msgs = await ctx.db
+      .query("messages")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+      .collect();
+    for (const m of msgs) {
+      await ctx.db.delete(m._id);
+    }
+    const conv = await ctx.db
+      .query("conversations")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+      .unique();
+    if (conv) {
+      await ctx.db.patch(conv._id, {
+        messageCount: 0,
+        lastActivityAt: Date.now(),
+      });
+    }
+    return msgs.length;
+  },
+});
+
 export const list = query({
   args: { conversationId: v.string(), limit: v.optional(v.number()) },
   handler: async (ctx, args) => {

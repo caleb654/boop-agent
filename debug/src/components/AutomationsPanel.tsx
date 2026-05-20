@@ -15,6 +15,20 @@ function timeAgo(ts?: number): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
+function formatNextRun(ts: number): string {
+  const date = new Date(ts);
+  const opts: Intl.DateTimeFormatOptions = {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  };
+  if (date.getFullYear() !== new Date().getFullYear()) {
+    opts.year = "numeric";
+  }
+  return date.toLocaleString([], opts);
+}
+
 const STATUS_COLOR: Record<string, { dot: string; text: string }> = {
   running: { dot: "bg-sky-400 live-dot", text: "text-sky-400" },
   completed: { dot: "bg-emerald-400", text: "text-emerald-400" },
@@ -148,13 +162,7 @@ export function AutomationsPanel({ isDark }: { isDark: boolean }) {
               >
                 {auto.lastRunAt && <span>Last run: {timeAgo(auto.lastRunAt)}</span>}
                 {auto.nextRunAt && auto.enabled && (
-                  <span>
-                    Next:{" "}
-                    {new Date(auto.nextRunAt).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </span>
+                  <span>Next: {formatNextRun(auto.nextRunAt)}</span>
                 )}
                 {auto.integrations.length > 0 && (
                   <span>integrations: {auto.integrations.join(", ")}</span>
@@ -181,6 +189,45 @@ function AutomationDetail({
   const runs = useQuery(api.automations.recentRuns, { automationId, limit: 30 });
   const setEnabled = useMutation(api.automations.setEnabled);
   const remove = useMutation(api.automations.remove);
+  const [running, setRunning] = useState(false);
+  const [skipping, setSkipping] = useState(false);
+
+  const triggerRun = async () => {
+    if (running) return;
+    setRunning(true);
+    try {
+      const r = await fetch(`/api/automations/${automationId}/run`, {
+        method: "POST",
+      });
+      if (!r.ok) {
+        const body = await r.text();
+        console.error("[automations] run failed", r.status, body);
+      }
+    } catch (err) {
+      console.error("[automations] run error", err);
+    } finally {
+      // Brief delay so the user sees the spinner state even on fast triggers.
+      setTimeout(() => setRunning(false), 600);
+    }
+  };
+
+  const skipNext = async () => {
+    if (skipping) return;
+    setSkipping(true);
+    try {
+      const r = await fetch(`/api/automations/${automationId}/skip-next`, {
+        method: "POST",
+      });
+      if (!r.ok) {
+        const body = await r.text();
+        console.error("[automations] skip failed", r.status, body);
+      }
+    } catch (err) {
+      console.error("[automations] skip error", err);
+    } finally {
+      setTimeout(() => setSkipping(false), 400);
+    }
+  };
 
   const mutedText = isDark ? "text-slate-500" : "text-slate-400";
 
@@ -254,6 +301,40 @@ function AutomationDetail({
         <span className={`text-xs ml-auto mono ${mutedText}`}>
           {formatSchedule(auto.schedule)}
         </span>
+
+        <button
+          onClick={triggerRun}
+          disabled={running}
+          className={`text-[11px] px-2 py-0.5 rounded border transition-colors ${
+            running
+              ? isDark
+                ? "text-slate-500 border-slate-700 cursor-wait"
+                : "text-slate-400 border-slate-200 cursor-wait"
+              : isDark
+                ? "text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10"
+                : "text-emerald-600 border-emerald-300 hover:bg-emerald-50"
+          }`}
+          title="Run this automation now, ignoring its schedule"
+        >
+          {running ? "Running…" : "Run now"}
+        </button>
+
+        <button
+          onClick={skipNext}
+          disabled={skipping || !auto.nextRunAt}
+          className={`text-[11px] px-2 py-0.5 rounded border transition-colors ${
+            skipping || !auto.nextRunAt
+              ? isDark
+                ? "text-slate-500 border-slate-700 cursor-not-allowed"
+                : "text-slate-400 border-slate-200 cursor-not-allowed"
+              : isDark
+                ? "text-amber-300 border-amber-500/30 hover:bg-amber-500/10"
+                : "text-amber-700 border-amber-300 hover:bg-amber-50"
+          }`}
+          title="Skip the currently scheduled next run and move to the following occurrence"
+        >
+          {skipping ? "Skipping..." : "Skip next"}
+        </button>
 
         <button
           onClick={() => {

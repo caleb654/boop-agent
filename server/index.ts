@@ -4,11 +4,18 @@ import cors from "cors";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { addClient } from "./broadcast.js";
-import { createSendblueRouter } from "./sendblue.js";
+import { createSendblueRouter, mountAtgImageRoute } from "./sendblue.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { loadIntegrations } from "./integrations/registry.js";
 import { startCleanupLoop } from "./memory/clean.js";
-import { startAutomationLoop } from "./automations.js";
+import {
+  bootstrapPosthogWeeklyReport,
+  bootstrapShopConversionReport,
+  bootstrapFlightPriceWatch,
+  startAutomationLoop,
+  skipNextAutomationRun,
+  triggerAutomation,
+} from "./automations.js";
 import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
 import { cancelAgent, retryAgent } from "./execution-agent.js";
@@ -19,6 +26,9 @@ import { createMemoryRouter } from "./memory-routes.js";
 
 async function main() {
   await loadIntegrations();
+  await bootstrapPosthogWeeklyReport();
+  await bootstrapShopConversionReport();
+  await bootstrapFlightPriceWatch();
   startCleanupLoop();
   startAutomationLoop();
   startHeartbeatLoop();
@@ -55,10 +65,32 @@ async function main() {
   app.use("/sendblue", createSendblueRouter());
   app.use("/composio", createComposioRouter());
   app.use("/memory", createMemoryRouter());
+  // Public read-only route that serves images rendered by the atg-exec
+  // integration (saved to /tmp/atg-images/<uuid>.png). Sendblue fetches
+  // them via media_url when the ATG agent attaches a chart/map.
+  app.use(mountAtgImageRoute());
 
   app.post("/agents/:id/cancel", (req, res) => {
     const ok = cancelAgent(req.params.id);
     res.json({ ok });
+  });
+
+  app.post("/automations/:id/run", async (req, res) => {
+    const ok = await triggerAutomation(req.params.id);
+    if (!ok) {
+      res.status(404).json({ error: "automation not found" });
+      return;
+    }
+    res.json({ ok: true, triggered: req.params.id });
+  });
+
+  app.post("/automations/:id/skip-next", async (req, res) => {
+    const result = await skipNextAutomationRun(req.params.id);
+    if (!result.ok) {
+      res.status(404).json({ error: result.error ?? "automation not found" });
+      return;
+    }
+    res.json(result);
   });
 
   app.post("/consolidate", async (_req, res) => {

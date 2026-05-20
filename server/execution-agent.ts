@@ -119,6 +119,19 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
     opts.integrations,
     opts.conversationId,
   );
+  const missingIntegrations = opts.integrations.filter((name) => !integrationServers[name]);
+  const missingIntegrationMessage =
+    missingIntegrations.length > 0
+      ? `Requested integration(s) were not loaded: ${missingIntegrations.join(", ")}`
+      : undefined;
+  if (missingIntegrations.length > 0) {
+    logAgent(missingIntegrationMessage!);
+    await convex.mutation(api.agents.addLog, {
+      agentId,
+      logType: "error",
+      content: missingIntegrationMessage!,
+    });
+  }
   const draftServer = opts.conversationId
     ? createDraftStagingMcp(opts.conversationId)
     : undefined;
@@ -139,76 +152,86 @@ export async function spawnExecutionAgent(opts: SpawnOptions): Promise<SpawnResu
   let errorMsg: string | undefined;
 
   const requestedModel = await getRuntimeModel();
-  try {
-    for await (const msg of query({
-      prompt: opts.task,
-      options: {
-        systemPrompt: EXECUTION_SYSTEM,
-        model: requestedModel,
-        mcpServers,
-        allowedTools,
-        // Load .claude/skills/ so the model can invoke SKILL.md playbooks. Without
-        // this the SDK runs in isolation mode and skills are silently ignored.
-        settingSources: ["project"],
-        permissionMode: "bypassPermissions",
-        abortController: abort,
-      },
-    })) {
-      if (msg.type === "assistant") {
-        for (const block of msg.message.content) {
-          if (block.type === "text") {
-            buffer += block.text;
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "text",
-              content: block.text,
-            });
-          } else if (block.type === "tool_use") {
-            const toolShort = block.name.replace(/^mcp__[a-z-]+__/, "");
-            const accounts = extractAccounts(block.input);
-            const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
-            logAgent(`tool: ${toolShort}${acctSuffix}`);
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "tool_use",
-              toolName: block.name,
-              ...(accounts.length ? { accounts } : {}),
-              content: JSON.stringify(block.input).slice(0, 2000),
-            });
-            broadcast("agent_tool", { agentId, toolName: block.name, accounts });
-          }
-        }
-      } else if (msg.type === "user") {
-        for (const block of msg.message.content) {
-          if (block.type === "tool_result") {
-            const text = Array.isArray(block.content)
-              ? block.content
-                  .map((c: { type: string; text?: string }) => (c.type === "text" ? (c.text ?? "") : ""))
-                  .join("")
-              : String(block.content ?? "");
-            await convex.mutation(api.agents.addLog, {
-              agentId,
-              logType: "tool_result",
-              content: text.slice(0, 2000),
-            });
-          }
-        }
-      } else if (msg.type === "result") {
-        // Always take the aggregate from modelUsage — msg.usage is just the
-        // final turn's raw tokens and massively undercounts on tool-heavy runs.
-        usage = aggregateUsageFromResult(msg, requestedModel);
-      }
-    }
-  } catch (err) {
-    status = abort.signal.aborted ? "cancelled" : "failed";
-    errorMsg = String(err);
-    await convex.mutation(api.agents.addLog, {
-      agentId,
-      logType: "error",
-      content: errorMsg,
-    });
-  } finally {
+  if (missingIntegrationMessage) {
+    status = "failed";
+    errorMsg = missingIntegrationMessage;
+    buffer =
+      `${missingIntegrationMessage}. I stopped here instead of falling back to generic web search, ` +
+      "because that would not prove the requested integration is usable.";
     running.delete(agentId);
+  } else {
+    try {
+      for await (const msg of query({
+        prompt: opts.task,
+        options: {
+          systemPrompt: EXECUTION_SYSTEM,
+          model: requestedModel,
+          mcpServers,
+          allowedTools,
+          // Load .claude/skills/ so the model can invoke SKILL.md playbooks. Without
+          // this the SDK runs in isolation mode and skills are silently ignored.
+          settingSources: ["project"],
+          permissionMode: "bypassPermissions",
+          abortController: abort,
+        },
+      })) {
+        if (msg.type === "assistant") {
+          for (const block of msg.message.content) {
+            if (block.type === "text") {
+              buffer += block.text;
+              await convex.mutation(api.agents.addLog, {
+                agentId,
+                logType: "text",
+                content: block.text,
+              });
+            } else if (block.type === "tool_use") {
+              const toolShort = block.name.replace(/^mcp__[a-z-]+__/, "");
+              const accounts = extractAccounts(block.input);
+              const acctSuffix = accounts.length ? ` [${accounts.join(", ")}]` : "";
+              logAgent(`tool: ${toolShort}${acctSuffix}`);
+              await convex.mutation(api.agents.addLog, {
+                agentId,
+                logType: "tool_use",
+                toolName: block.name,
+                ...(accounts.length ? { accounts } : {}),
+                content: JSON.stringify(block.input).slice(0, 2000),
+              });
+              broadcast("agent_tool", { agentId, toolName: block.name, accounts });
+            }
+          }
+        } else if (msg.type === "user") {
+          for (const block of msg.message.content) {
+            if (typeof block === "string") continue;
+            if (block.type === "tool_result") {
+              const text = Array.isArray(block.content)
+                ? block.content
+                    .map((c: { type: string; text?: string }) => (c.type === "text" ? (c.text ?? "") : ""))
+                    .join("")
+                : String(block.content ?? "");
+              await convex.mutation(api.agents.addLog, {
+                agentId,
+                logType: "tool_result",
+                content: text.slice(0, 2000),
+              });
+            }
+          }
+        } else if (msg.type === "result") {
+          // Always take the aggregate from modelUsage — msg.usage is just the
+          // final turn's raw tokens and massively undercounts on tool-heavy runs.
+          usage = aggregateUsageFromResult(msg, requestedModel);
+        }
+      }
+    } catch (err) {
+      status = abort.signal.aborted ? "cancelled" : "failed";
+      errorMsg = String(err);
+      await convex.mutation(api.agents.addLog, {
+        agentId,
+        logType: "error",
+        content: errorMsg,
+      });
+    } finally {
+      running.delete(agentId);
+    }
   }
 
   const elapsed = ((Date.now() - agentStart) / 1000).toFixed(1);

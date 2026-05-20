@@ -37,6 +37,58 @@ interface ExtractedFact {
   corrects?: string | null;
 }
 
+/**
+ * Find the first balanced {...} substring whose JSON parses and contains a
+ * `facts` array. Walks brace depth in a string-aware way so braces inside
+ * quoted strings (and braces from incidental code in the assistant reply, like
+ * `import { query } from "..."`) don't break the match.
+ */
+function extractFactsObject(s: string): { facts: ExtractedFact[] } | null {
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "{") continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let j = i; j < s.length; j++) {
+      const c = s[j];
+      if (inStr) {
+        if (esc) {
+          esc = false;
+          continue;
+        }
+        if (c === "\\") {
+          esc = true;
+          continue;
+        }
+        if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') {
+        inStr = true;
+        continue;
+      }
+      if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(s.slice(i, j + 1)) as {
+              facts?: ExtractedFact[];
+            };
+            if (Array.isArray(parsed.facts)) {
+              return { facts: parsed.facts };
+            }
+          } catch {
+            /* try next candidate */
+          }
+          break;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 export async function extractAndStore(opts: {
   conversationId: string;
   userMessage: string;
@@ -81,10 +133,9 @@ export async function extractAndStore(opts: {
       });
     }
 
-    const match = buffer.match(/\{[\s\S]*\}/);
-    if (!match) return;
-    const parsed = JSON.parse(match[0]) as { facts?: ExtractedFact[] };
-    const facts = parsed.facts ?? [];
+    const parsed = extractFactsObject(buffer);
+    if (!parsed) return;
+    const facts = parsed.facts;
 
     for (const f of facts) {
       const defaults = SEGMENT_DEFAULTS[f.segment];

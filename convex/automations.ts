@@ -22,6 +22,57 @@ export const create = mutation({
     return await ctx.db.insert("automations", {
       ...args,
       enabled: true,
+      kind: "task",
+      createdAt: Date.now(),
+    });
+  },
+});
+
+// Idempotent bootstrap for system automations (e.g. iMessage scanner). Inserts
+// on first call; on subsequent calls only updates the schedule and handler so
+// config changes propagate without losing enabled-state or run history.
+export const upsertSystem = mutation({
+  args: {
+    automationId: v.string(),
+    name: v.string(),
+    schedule: v.string(),
+    systemHandler: v.string(),
+    timezone: v.optional(v.string()),
+    notifyConversationId: v.optional(v.string()),
+    nextRunAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("automations")
+      .withIndex("by_automation_id", (q) => q.eq("automationId", args.automationId))
+      .unique();
+    if (existing) {
+      const scheduleChanged =
+        existing.schedule !== args.schedule ||
+        existing.timezone !== args.timezone ||
+        existing.systemHandler !== args.systemHandler;
+      await ctx.db.patch(existing._id, {
+        schedule: args.schedule,
+        systemHandler: args.systemHandler,
+        name: args.name,
+        timezone: args.timezone,
+        notifyConversationId: args.notifyConversationId,
+        ...(scheduleChanged ? { nextRunAt: args.nextRunAt } : {}),
+      });
+      return existing._id;
+    }
+    return await ctx.db.insert("automations", {
+      automationId: args.automationId,
+      name: args.name,
+      task: "(system handler)",
+      integrations: [],
+      schedule: args.schedule,
+      timezone: args.timezone,
+      enabled: true,
+      kind: "system",
+      systemHandler: args.systemHandler,
+      notifyConversationId: args.notifyConversationId,
+      nextRunAt: args.nextRunAt,
       createdAt: Date.now(),
     });
   },
@@ -95,6 +146,22 @@ export const markRan = mutation({
       lastRunAt: args.lastRunAt,
       nextRunAt: args.nextRunAt,
     });
+    return auto._id;
+  },
+});
+
+export const setNextRun = mutation({
+  args: {
+    automationId: v.string(),
+    nextRunAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const auto = await ctx.db
+      .query("automations")
+      .withIndex("by_automation_id", (q) => q.eq("automationId", args.automationId))
+      .unique();
+    if (!auto) return null;
+    await ctx.db.patch(auto._id, { nextRunAt: args.nextRunAt });
     return auto._id;
   },
 });

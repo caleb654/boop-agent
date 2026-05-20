@@ -26,6 +26,19 @@ export function getIntegration(name: string): IntegrationModule | undefined {
 }
 
 export async function loadIntegrations(): Promise<void> {
+  // Hand-rolled custom integrations (HTTP wrappers that aren't in Composio's
+  // catalog). Each one is gated on its own env var so missing keys mean
+  // "skip", not "crash".
+  if (process.env.CARDTOOL_API_KEY) {
+    const { buildCardtoolIntegrationModule } = await import("./cardtool.js");
+    registerIntegration(buildCardtoolIntegrationModule());
+  }
+
+  if (process.env.ATG_EXEC_SECRET) {
+    const { buildAtgExecIntegrationModule } = await import("./atg-exec.js");
+    registerIntegration(buildAtgExecIntegrationModule());
+  }
+
   const { registerComposioToolkits } = await import("./composio-loader.js");
   await registerComposioToolkits();
   const loaded = [...registry.keys()];
@@ -49,11 +62,20 @@ export async function buildMcpServersForIntegrations(
 ): Promise<Record<string, McpSdkServerConfigWithInstance>> {
   const ctx = makeContext(conversationId);
   const out: Record<string, McpSdkServerConfigWithInstance> = {};
+  let refreshed = false;
   for (const name of names) {
-    const mod = registry.get(name);
+    let mod = registry.get(name);
     if (!mod) {
-      console.warn(`[integrations] unknown integration: ${name}`);
-      continue;
+      if (!refreshed) {
+        console.warn(`[integrations] unknown integration: ${name}; refreshing registry`);
+        refreshed = true;
+        await refreshIntegrations();
+        mod = registry.get(name);
+      }
+      if (!mod) {
+        console.warn(`[integrations] unknown integration after refresh: ${name}`);
+        continue;
+      }
     }
     try {
       out[name] = await mod.createServer(ctx);

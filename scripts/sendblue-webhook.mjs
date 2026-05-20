@@ -22,11 +22,12 @@ const root = resolve(here, "..");
 const envPath = resolve(root, ".env.local");
 
 function readEnv() {
-  if (!existsSync(envPath)) return {};
-  const env = {};
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const m = line.match(/^([A-Z0-9_]+)=(.*?)(?:\s+#.*)?$/);
-    if (m) env[m[1]] = m[2].trim();
+  const env = { ...process.env };
+  if (existsSync(envPath)) {
+    for (const line of readFileSync(envPath, "utf8").split("\n")) {
+      const m = line.match(/^([A-Z0-9_]+)=(.*?)(?:\s+#.*)?$/);
+      if (m && !env[m[1]]) env[m[1]] = m[2].trim();
+    }
   }
   return env;
 }
@@ -80,7 +81,7 @@ async function main() {
 
   const env = readEnv();
   if (!env.SENDBLUE_API_KEY || !env.SENDBLUE_API_SECRET) {
-    console.log("[webhook] skipping — SENDBLUE_API_KEY/SECRET not set in .env.local");
+    console.log("[webhook] skipping — SENDBLUE_API_KEY/SECRET not set");
     return;
   }
 

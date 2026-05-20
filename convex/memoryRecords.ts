@@ -180,6 +180,19 @@ export const setLifecycle = mutation({
   },
 });
 
+export const remove = mutation({
+  args: { memoryId: v.string() },
+  handler: async (ctx, args) => {
+    const mem = await ctx.db
+      .query("memoryRecords")
+      .withIndex("by_memory_id", (q) => q.eq("memoryId", args.memoryId))
+      .unique();
+    if (!mem) return null;
+    await ctx.db.delete(mem._id);
+    return mem._id;
+  },
+});
+
 const COUNTS_SCAN_LIMIT = 5000;
 
 export const embeddingStats = query({
@@ -235,6 +248,30 @@ export const listUnembeddedPage = query({
       page: result.page
         .filter((m) => !m.embedding || m.embedding.length === 0)
         .map((m) => ({ memoryId: m.memoryId, content: m.content })),
+      isDone: result.isDone,
+      continueCursor: result.continueCursor,
+    };
+  },
+});
+
+// Cursor-based scan over every active memory. Used for force-refreshing
+// embeddings when switching providers.
+export const listActivePage = query({
+  args: {
+    cursor: v.optional(v.union(v.string(), v.null())),
+    pageSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const result = await ctx.db
+      .query("memoryRecords")
+      .withIndex("by_lifecycle", (q) => q.eq("lifecycle", "active"))
+      .order("desc")
+      .paginate({
+        cursor: args.cursor ?? null,
+        numItems: args.pageSize ?? 50,
+      });
+    return {
+      page: result.page.map((m) => ({ memoryId: m.memoryId, content: m.content })),
       isDone: result.isDone,
       continueCursor: result.continueCursor,
     };

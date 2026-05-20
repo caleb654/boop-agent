@@ -6,12 +6,15 @@ import { createMemoryMcp } from "./memory/tools.js";
 import { extractAndStore } from "./memory/extract.js";
 import { availableIntegrations, spawnExecutionAgent } from "./execution-agent.js";
 import { createAutomationMcp } from "./automation-tools.js";
+import { createCodingMcp } from "./coding-tools.js";
 import { createDraftDecisionMcp } from "./draft-tools.js";
+import { createImessageMcp } from "./imessage-tools.js";
 import { createSelfMcp } from "./self-tools.js";
 import { getRuntimeModel } from "./runtime-config.js";
 import { broadcast } from "./broadcast.js";
 import { sendImessage } from "./sendblue.js";
 import { aggregateUsageFromResult, EMPTY_USAGE, type UsageTotals } from "./usage.js";
+import { askAtgExec } from "./integrations/atg-exec.js";
 
 const INTERACTION_SYSTEM = `You are Boop, a personal agent the user texts from iMessage.
 
@@ -26,6 +29,8 @@ Tone: Warm, witty, concise. Write like you're texting a friend. No corporate voi
 Your only tools:
 - recall / write_memory (durable memory for this user)
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
+- spawn_coder / continue_coder / list_running_coders / list_recent_coders / cancel_coder (dispatches a real local Claude Code or Codex CLI inside a project directory; runs ASYNC and texts the user when done)
+- recent_messages_from_contact (reads recent local iMessage/SMS history for a named contact through the imsg CLI)
 - create_automation / list_automations / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
 - get_config / set_model / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
@@ -162,6 +167,29 @@ before saving.
 
 Available integrations for spawn_agent: {{INTEGRATIONS}}
 
+ATG business questions:
+- For anything about ATG / Athletic Truth Group business metrics — MRR, ARR, churn, cancelled subs, new signups, customers, top products, country breakdowns, weekly briefings, finance sheets, PostHog metrics, Chargebee/Shopify data — call ask_atg DIRECTLY. Do NOT spawn a sub-agent for these; ask_atg already has all the integrations and skipping the spawn layer saves seconds.
+- ask_atg may return an image marker like [ATG_IMAGE:/abs/path.png]. INCLUDE IT VERBATIM in your final reply (on its own line). The reply pipeline strips it and attaches the image to the iMessage. Do not describe the image, do not paraphrase, do not strip the marker — keep your text reply short, the image does the talking.
+
+Coding (spawn_coder):
+- Use for any programming/software/project task that needs local project files, shell commands, dependencies, tests, config, repo setup, dev servers, webhooks, API keys, migrations, UI changes, bug fixes, refactors, package installs, deploy/tunnel setup, or checking how a codebase works.
+- Infer coding intent from normal language. The user will usually NOT say "coder" or "coding agent". Requests like "add this", "fix that bug", "set up this project", "update the webhook", "make the UI show X", "why is the server doing Y", "run the tests", "install this package", "wire up OpenAI", "change the architecture", or "continue that change" should route here when they are about a repo or local app.
+- Do NOT use generic spawn_agent for repo work unless the task is mainly external research/account work with no local code changes.
+- Pass "project" (bare name resolves to ~/Programming/<name>, or absolute path) and a crisp task.
+- Default to agent="claude". Use agent="codex" only when the user explicitly asks for Codex ("use codex", "do this with codex", etc.).
+- spawn_coder runs ASYNC. It returns immediately. The coder works in the background and the user receives a follow-up iMessage like "[coder done - <project>]..." when it finishes. Tell the user you've kicked it off; do NOT pretend the work is done.
+- The coder has full project-local CLI power. Claude Code sessions start with remote control enabled when supported; completion messages include a resume command so the user can jump in directly.
+- For follow-up iteration on the last programming/project task, use continue_coder instead of asking for the project again. Examples: "also make it show the date", "that didn't work", "have it fix the test", "can you tweak the button", "now wire up OpenAI", "why did it do local", "force re-embed", "keep going", "ship that with Codex". It resumes the most recent coder session and texts the user when done.
+- For status questions ("where's that fix at?", "what's still running?") use list_running_coders.
+- For outcome/failure questions ("did it fail?", "is it done?", "why did it cancel?", "what happened?"), call list_recent_coders before answering. Do not guess from conversation context and do not start a new coder unless the user asks to retry or continue.
+- For "cancel that" use cancel_coder with the agentId from list_running_coders.
+- If a recent turn in this conversation listed image attachment paths (e.g. under /Users/.../Library/Messages/Attachments/), include those absolute paths verbatim in the task string you pass to spawn_coder. The coder's Read tool can open PNG/JPEG/HEIC and the images often carry the actual context the sender meant to convey.
+
+iMessage lookup:
+- When the user explicitly asks to look at, inspect, summarize, or use recent texts/iMessages from a named person, call recent_messages_from_contact. Do not ask for a phone number first; names like "Isaac" resolve through imsg chat metadata.
+- This is for local Messages history only. Do not use it for generic facts about a person or for contacting them.
+- If the returned messages include attachment paths and the user wants coding/design work based on them, pass those absolute paths to spawn_coder or continue_coder.
+
 Format: Plain iMessage-friendly text. Markdown sparingly. Keep replies under ~400 chars when you can.`;
 
 interface HandleOpts {
@@ -180,6 +208,21 @@ function randomId(prefix: string): string {
 }
 
 export async function handleUserMessage(opts: HandleOpts): Promise<string> {
+  // Deterministic /clear short-circuit. Exact match (trim + case-insensitive)
+  // on "clear" wipes conversation history before any LLM call. Does NOT touch
+  // memory or coding sessions — only the per-turn message history.
+  // Returns the reply string and lets the webhook handler send/persist it.
+  if (opts.content.trim().toLowerCase() === "clear") {
+    const deleted = await convex.mutation(api.messages.clearConversation, {
+      conversationId: opts.conversationId,
+    });
+    broadcast("conversation_cleared", {
+      conversationId: opts.conversationId,
+      deleted,
+    });
+    return `Cleared ${deleted} message${deleted === 1 ? "" : "s"}. Fresh start. (Memory kept.)`;
+  }
+
   const turnId = randomId("turn");
   const integrations = availableIntegrations();
 
@@ -197,7 +240,9 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
 
   const memoryServer = createMemoryMcp(opts.conversationId);
   const automationServer = createAutomationMcp(opts.conversationId);
+  const codingServer = createCodingMcp(opts.conversationId);
   const draftDecisionServer = createDraftDecisionMcp(opts.conversationId);
+  const imessageServer = createImessageMcp();
   const selfServer = createSelfMcp();
 
   const ackServer = createSdkMcpServer({
@@ -244,6 +289,60 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
       ),
     ],
   });
+
+  // Direct ATG access at the interaction-agent layer. Skipping the sub-agent
+  // for ATG questions cuts ~5–10s off the round trip — the IA itself can call
+  // exec-chat's /api/ask, then pass the image marker straight through to the
+  // user. Only registered when ATG_EXEC_SECRET is set.
+  const atgServer = process.env.ATG_EXEC_SECRET
+    ? createSdkMcpServer({
+        name: "boop-atg",
+        version: "0.1.0",
+        tools: [
+          tool(
+            "ask_atg",
+            [
+              "Ask ATG Exec Chat (Caleb's ATG business assistant) a natural-language question. Read-only",
+              "access to Chargebee (US + International), Shopify (orders / customers / products / top",
+              "sellers), Google Sheets finance, and PostHog. Use this for any ATG / business question:",
+              "MRR, ARR, churn, cancellations, signups, top products, country breakdowns, weekly briefings,",
+              "HogQL queries, finance-sheet stuff. Don't spawn a sub-agent for these — call this directly.",
+              "",
+              "When the answer is visual (chart / map / table / KPIs / briefing) the tool returns an",
+              "image marker `[ATG_IMAGE:/absolute/path.png]`. INCLUDE THAT MARKER VERBATIM in your reply.",
+              "The reply pipeline strips it and attaches the image to the iMessage. Don't paraphrase or",
+              "describe the image — let it speak for itself, and keep your text reply short.",
+            ].join("\n"),
+            {
+              question: z
+                .string()
+                .describe("Natural-language question, including any time-range/region context. Pass through the user's wording."),
+              format: z
+                .enum(["text", "rich"])
+                .optional()
+                .describe("'rich' (default) returns an image when the answer is visual. Use 'text' to suppress images."),
+              model: z
+                .enum(["gemini-3.5-flash", "gpt-5.5"])
+                .optional()
+                .describe("Override exec-chat's model. Defaults to GPT 5.5."),
+            },
+            async (args) => {
+              const result = await askAtgExec(args.question, {
+                format: args.format,
+                model: args.model,
+              });
+              const lines = [result.text || "(no text response)"];
+              if (result.imagePath) {
+                lines.push("", `[ATG_IMAGE:${result.imagePath}]`);
+              }
+              return {
+                content: [{ type: "text" as const, text: lines.join("\n") }],
+              };
+            },
+          ),
+        ],
+      })
+    : null;
 
   const spawnServer = createSdkMcpServer({
     name: "boop-spawn",
@@ -316,14 +415,22 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "boop-memory": memoryServer,
           "boop-spawn": spawnServer,
           "boop-automations": automationServer,
+          "boop-coding": codingServer,
           "boop-draft-decisions": draftDecisionServer,
+          "boop-imessage": imessageServer,
           "boop-ack": ackServer,
           "boop-self": selfServer,
+          ...(atgServer ? { "boop-atg": atgServer } : {}),
         },
         allowedTools: [
           "mcp__boop-memory__write_memory",
           "mcp__boop-memory__recall",
           "mcp__boop-spawn__spawn_agent",
+          "mcp__boop-coding__spawn_coder",
+          "mcp__boop-coding__continue_coder",
+          "mcp__boop-coding__list_running_coders",
+          "mcp__boop-coding__list_recent_coders",
+          "mcp__boop-coding__cancel_coder",
           "mcp__boop-automations__create_automation",
           "mcp__boop-automations__list_automations",
           "mcp__boop-automations__toggle_automation",
@@ -331,6 +438,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "mcp__boop-draft-decisions__list_drafts",
           "mcp__boop-draft-decisions__send_draft",
           "mcp__boop-draft-decisions__reject_draft",
+          "mcp__boop-imessage__recent_messages_from_contact",
           "mcp__boop-ack__send_ack",
           "mcp__boop-self__get_config",
           "mcp__boop-self__set_model",
@@ -338,6 +446,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
           "mcp__boop-self__list_integrations",
           "mcp__boop-self__search_composio_catalog",
           "mcp__boop-self__inspect_toolkit",
+          "mcp__boop-atg__ask_atg",
         ],
         // Belt-and-suspenders: even with bypassPermissions the SDK can leak
         // its built-ins if we only whitelist. Explicitly block them on the

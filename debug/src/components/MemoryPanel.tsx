@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
 import MemoryGraphView from "./MemoryGraphView.js";
 import { EmbeddingBanner } from "./EmbeddingBanner.js";
@@ -55,6 +55,8 @@ export function MemoryPanel({ isDark }: { isDark: boolean }) {
   const [segmentFilter, setSegmentFilter] = useState<Segment>("all");
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const removeMemory = useMutation(api.memoryRecords.remove);
 
   const records = useQuery(api.memoryRecords.list, {
     tier: tierFilter !== "all" ? (tierFilter as any) : undefined,
@@ -82,6 +84,16 @@ export function MemoryPanel({ isDark }: { isDark: boolean }) {
   const btnInactive = isDark
     ? "text-slate-500 hover:text-slate-300 hover:bg-slate-800"
     : "text-slate-400 hover:text-slate-600 hover:bg-slate-100";
+
+  const deleteMemory = async (memoryId: string) => {
+    setDeletingId(memoryId);
+    try {
+      await removeMemory({ memoryId });
+      if (expandedId === memoryId) setExpandedId(null);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full -m-5">
@@ -246,6 +258,26 @@ export function MemoryPanel({ isDark }: { isDark: boolean }) {
                       >
                         {r.accessCount ?? 0}x
                       </span>
+                      <button
+                        type="button"
+                        disabled={deletingId === r.memoryId}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void deleteMemory(r.memoryId);
+                        }}
+                        className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                          deletingId === r.memoryId
+                            ? isDark
+                              ? "text-slate-600 border-slate-800 cursor-wait"
+                              : "text-slate-300 border-slate-200 cursor-wait"
+                            : isDark
+                              ? "text-rose-400 border-rose-500/30 hover:bg-rose-500/10"
+                              : "text-rose-600 border-rose-200 hover:bg-rose-50"
+                        }`}
+                        title="Delete memory"
+                      >
+                        {deletingId === r.memoryId ? "Deleting" : "Delete"}
+                      </button>
                     </div>
 
                     <p

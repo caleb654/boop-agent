@@ -163,6 +163,11 @@ export default defineSchema({
     lastRunAt: v.optional(v.number()),
     nextRunAt: v.optional(v.number()),
     createdAt: v.number(),
+    // 'task' (default) → fires spawnExecutionAgent with the LLM task.
+    // 'system' → runs a registered server-side handler (chat.db scan, etc.)
+    // identified by `systemHandler`. Treat undefined as 'task' for backcompat.
+    kind: v.optional(v.union(v.literal("task"), v.literal("system"))),
+    systemHandler: v.optional(v.string()),
   })
     .index("by_automation_id", ["automationId"])
     .index("by_enabled", ["enabled"]),

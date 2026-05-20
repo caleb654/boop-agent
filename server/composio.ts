@@ -61,7 +61,7 @@ export function getComposio(): Composio<ClaudeAgentSDKProvider> | null {
 }
 
 export function boopUserId(): string {
-  return process.env.COMPOSIO_USER_ID ?? "boop-default";
+  return process.env.COMPOSIO_USER_ID?.trim() || "boop-default";
 }
 
 export function displayNameFor(slug: string): string {

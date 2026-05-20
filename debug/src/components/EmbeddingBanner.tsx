@@ -21,6 +21,7 @@ export function EmbeddingBanner({ isDark }: { isDark: boolean }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ embedded: number; failed: number } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [forceMode, setForceMode] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -63,34 +64,41 @@ export function EmbeddingBanner({ isDark }: { isDark: boolean }) {
       const d = e.data as { embedded: number; failed: number };
       setProgress({ embedded: d.embedded, failed: d.failed });
       setBusy(false);
+      setForceMode(false);
       void refresh();
     }
   });
 
-  const reembed = useCallback(async () => {
+  const reembed = useCallback(async (force = false) => {
     setBusy(true);
+    setForceMode(force);
     setErrorMsg(null);
     setProgress({ embedded: 0, failed: 0 });
     try {
-      const r = await fetch("/api/memory/reembed", { method: "POST" });
+      const r = await fetch(`/api/memory/reembed${force ? "?force=true" : ""}`, {
+        method: "POST",
+      });
       const data = await r.json();
       if (!r.ok || !data.ok) {
         setErrorMsg(data.error ?? `Re-embed failed (${r.status})`);
         setBusy(false);
+        setForceMode(false);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setBusy(false);
+      setForceMode(false);
     }
   }, []);
 
   if (!status) return null;
 
   const isStale = status.withoutEmbedding > 0;
-  const showBanner = isStale || busy || errorMsg;
+  const canForceRefresh = status.withEmbedding > 0;
+  const showBanner = isStale || canForceRefresh || busy || errorMsg;
   if (!showBanner) return null;
 
-  const tone = isStale && !busy ? "warn" : "info";
+  const tone = isStale && !busy && !forceMode ? "warn" : "info";
   const bg =
     tone === "warn"
       ? isDark
@@ -105,13 +113,16 @@ export function EmbeddingBanner({ isDark }: { isDark: boolean }) {
   let title = "";
   let detail = "";
   if (busy) {
-    title = "Re-embedding memories…";
+    title = forceMode ? "Refreshing memory embeddings…" : "Re-embedding memories…";
     detail = progress
       ? `Embedded ${progress.embedded}${progress.failed ? ` · ${progress.failed} failed` : ""}.`
       : "Starting…";
   } else if (isStale) {
     title = `${status.withoutEmbedding} of ${status.total} memories have no embedding`;
     detail = `Semantic recall can't find them — falls back to literal substring matching. Re-embed via ${PROVIDER_LABEL[status.provider]} to fix.`;
+  } else if (!errorMsg && canForceRefresh) {
+    title = `All ${status.withEmbedding} memories have embeddings`;
+    detail = `Refresh them with ${PROVIDER_LABEL[status.provider]} if you switched providers or want to replace old vectors.`;
   } else if (errorMsg) {
     title = "Re-embed error";
     detail = errorMsg;
@@ -126,7 +137,7 @@ export function EmbeddingBanner({ isDark }: { isDark: boolean }) {
         </div>
         {!busy && isStale && (
           <button
-            onClick={reembed}
+            onClick={() => reembed(false)}
             className={`shrink-0 text-xs px-3 py-1.5 rounded-md border transition ${
               isDark
                 ? "border-amber-500/40 hover:bg-amber-500/20 text-amber-200"
@@ -134,6 +145,18 @@ export function EmbeddingBanner({ isDark }: { isDark: boolean }) {
             }`}
           >
             Re-embed now
+          </button>
+        )}
+        {!busy && !isStale && canForceRefresh && (
+          <button
+            onClick={() => reembed(true)}
+            className={`shrink-0 text-xs px-3 py-1.5 rounded-md border transition ${
+              isDark
+                ? "border-slate-600 hover:bg-slate-700/60 text-slate-200"
+                : "border-slate-300 hover:bg-slate-200 text-slate-700"
+            }`}
+          >
+            Refresh embeddings
           </button>
         )}
         {busy && (
@@ -144,7 +167,7 @@ export function EmbeddingBanner({ isDark }: { isDark: boolean }) {
           >
             {progress?.embedded ?? 0} /{" "}
             {Math.max(
-              status.withoutEmbedding,
+              forceMode ? status.total : status.withoutEmbedding,
               (progress?.embedded ?? 0) + (progress?.failed ?? 0),
             )}
           </div>

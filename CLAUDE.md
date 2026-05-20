@@ -6,6 +6,12 @@ When working on Convex code, **always read `convex/_generated/ai/guidelines.md` 
 Convex agent skills for common tasks can be installed by running `npx convex ai-files install`.
 <!-- convex-ai-end -->
 
+## Automation text routing
+
+Scheduled automations that send texts must use the local iMessage CLI, not Sendblue. Use `sendLocalImessage(toNumber, text)` from `server/local-imessage.ts`, which shells out to `imsg send --to <number> --text <body> --service imessage`. This makes automation messages appear as sent from the user's local iMessage account in Messages.app.
+
+Sendblue remains the inbound webhook transport for people texting the Boop number and for immediate Boop replies to that Sendblue conversation. Do not use `server/sendblue.ts` for new scheduled outbound automations unless the user explicitly asks for Sendblue.
+
 ## Pre-commit checks (this is a public repo)
 
 Before staging or committing **any** file, scan it for personal or sensitive data. Once it lands in git history it's effectively permanent — even after rewriting history, GitHub keeps orphaned commit SHAs reachable for weeks.
@@ -28,3 +34,4 @@ Process:
 2. Prefer not committing ad-hoc debug scripts at all — keep them in your shell history or a gitignored scratch dir.
 3. If you realize PII slipped in **before pushing**, amend or reset and re-commit cleanly.
 4. If it already pushed, see the recovery steps in [GitHub's sensitive data docs](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository) and rotate any exposed credentials.
+<!-- test coding task completed -->

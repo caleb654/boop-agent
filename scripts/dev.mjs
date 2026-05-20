@@ -27,8 +27,8 @@ if (!existsSync(resolve(root, "convex/_generated/api.js"))) {
 // --- read PORT from .env.local ------------------------------------------
 function readEnv() {
   const p = resolve(root, ".env.local");
-  if (!existsSync(p)) return {};
-  const env = {};
+  const env = { ...process.env };
+  if (!existsSync(p)) return env;
   for (const line of readFileSync(p, "utf8").split("\n")) {
     const m = line.match(/^([A-Z0-9_]+)=(.*?)(?:\s+#.*)?$/);
     if (m) env[m[1]] = m[2].trim();
@@ -196,7 +196,7 @@ run("upstream", "node", ["scripts/check-upstream.mjs"]);
 const serverChild = run(
   "server",
   "npx",
-  ["tsx", "watch", "server/index.ts"],
+  ["tsx", "watch", "--exclude", "scripts/**", "--exclude", "debug/**", "server/index.ts"],
   /listening on :/,
 );
 const convexChild = run(

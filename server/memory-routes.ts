@@ -8,7 +8,7 @@ import { broadcast } from "./broadcast.js";
 // double-bills the embedding API and writes the same rows twice.
 let runningReembed: Promise<{ embedded: number; failed: number }> | null = null;
 
-async function runReembed(): Promise<{ embedded: number; failed: number }> {
+async function runReembed(opts: { force?: boolean } = {}): Promise<{ embedded: number; failed: number }> {
   let embedded = 0;
   let failed = 0;
   // Track every memoryId we've attempted in this run, so a row that fails
@@ -23,10 +23,15 @@ async function runReembed(): Promise<{ embedded: number; failed: number }> {
       page: Array<{ memoryId: string; content: string }>;
       isDone: boolean;
       continueCursor: string;
-    } = await convex.query(api.memoryRecords.listUnembeddedPage, {
-      cursor,
-      pageSize: 50,
-    });
+    } = opts.force
+      ? await convex.query(api.memoryRecords.listActivePage, {
+          cursor,
+          pageSize: 50,
+        })
+      : await convex.query(api.memoryRecords.listUnembeddedPage, {
+          cursor,
+          pageSize: 50,
+        });
     cursor = result.continueCursor;
     isDone = result.isDone;
     for (const row of result.page) {
@@ -64,7 +69,7 @@ async function runReembed(): Promise<{ embedded: number; failed: number }> {
       }
     }
   }
-  broadcast("memory.reembed.done", { embedded, failed });
+  broadcast("memory.reembed.done", { embedded, failed, force: Boolean(opts.force) });
   return { embedded, failed };
 }
 
@@ -86,18 +91,19 @@ export function createMemoryRouter(): express.Router {
     }
   });
 
-  router.post("/reembed", async (_req, res) => {
+  router.post("/reembed", async (req, res) => {
     if (runningReembed) {
       res.status(409).json({ error: "re-embed already in progress" });
       return;
     }
-    runningReembed = runReembed().finally(() => {
+    const force = req.query.force === "true" || req.body?.force === true;
+    runningReembed = runReembed({ force }).finally(() => {
       runningReembed = null;
     });
     // Fire-and-forget: respond immediately and let the WS broadcast carry
     // progress. The HTTP response only confirms the job started.
     runningReembed.catch((err) => console.error("[reembed]", err));
-    res.json({ ok: true, started: true, provider: activeProvider() });
+    res.json({ ok: true, started: true, provider: activeProvider(), force });
   });
 
   return router;

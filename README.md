@@ -1,3 +1,5 @@
+<!-- last tested: 2026-05-13 -->
+<!-- test run #2: 2026-05-13 -->
 <p align="center">
   <img src="assets/boop.gif" alt="Boop" width="220" />
 </p>
@@ -42,7 +44,7 @@ Built on:
 - **Tiered memory** (short / long / permanent) with post-turn extraction, decay, and cleaning.
 - **Vector search** for recall when you add an embeddings key (Voyage or OpenAI) — falls back to substring.
 - **Memory consolidation** — a daily 3-phase adversarial pipeline (proposer → adversary → judge) that merges duplicates, resolves contradictions, and prunes noise. Proposer and judge on Sonnet; adversary on Haiku for cheap skepticism. Runs every 24h by default, also triggerable manually via `POST /consolidate`.
-- **Automations** — the agent can schedule recurring work from a text ("every morning at 8 summarize my calendar") and push results back to iMessage.
+- **Automations** — the agent can schedule recurring work from a text ("every morning at 8 summarize my calendar") and push results back through the local `imsg` CLI so scheduled texts come from your iMessage account and appear in Messages.app.
 - **Draft-and-send** — any external action stages a draft first; the agent only commits when the user confirms.
 - **Heartbeat + retry** — stuck agents auto-fail, debug dashboard can retry.
 - **Composio-powered integrations** — one API key unlocks 1000+ toolkits. Connect Gmail, Slack, GitHub, Linear, Notion, Drive, HubSpot, etc. with a click from the debug dashboard. Composio handles OAuth + token refresh.
@@ -350,21 +352,26 @@ If you'd prefer an API key (e.g. for a deployed server), set `ANTHROPIC_API_KEY`
 
 ## Environment variables
 
-Everything lives in `.env.local` (auto-created by `npm run setup`). See `.env.example` for the full list.
+Secrets are resolved by Varlock from the `DEV` 1Password vault using `.env.schema`.
+Local project settings that are not secrets can stay in `.env.local` (auto-created
+by `npm run setup`). Use `npm run env:check` to validate the combined config and
+`npm run env:scan` to check for plaintext secret leaks.
 
 | Var | Required | Notes |
 |---|---|---|
 | `CONVEX_URL` / `VITE_CONVEX_URL` | yes | Convex deployment URL. Written by `npx convex dev`. |
-| `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` | yes | From your Sendblue dashboard. |
+| `SENDBLUE_API_KEY` / `SENDBLUE_API_SECRET` | yes | Secret values from `op://DEV/SENDBLUE_API_KEY/credential` and `op://DEV/SENDBLUE_API_SECRET/credential`. |
 | `SENDBLUE_FROM_NUMBER` | yes | Your Sendblue-provisioned number. |
 | `BOOP_MODEL` | no | Default `claude-sonnet-4-6`. Used as the fallback when no runtime override is set. The user can switch the model at runtime from iMessage ("use opus", "switch to sonnet") via the `set_model` self-tool — that override is stored in the Convex `settings` table and takes precedence over this env var. |
 | `BOOP_UPSTREAM_CHECK` | no | Set to `false` to disable the new-version banner on `npm run dev`. Default: on. |
 | `PORT` | no | Default `3456`. |
 | `PUBLIC_URL` | no | Base URL used in the Sendblue webhook. Composio handles its own OAuth callbacks on `platform.composio.dev`, so this is just for inbound iMessage. |
-| `VOYAGE_API_KEY` **or** `OPENAI_API_KEY` | optional | Unlocks vector recall. Falls back to substring. |
-| `COMPOSIO_API_KEY` | optional | Enables integrations. Without it, plain chat + memory + automations still work. Get one at [app.composio.dev/developers](https://app.composio.dev/developers?utm_source=chris&utm_medium=youtube&utm_campaign=collab). |
+| `VOYAGE_API_KEY` **or** `OPENAI_API_KEY` | optional | Unlocks vector recall. `OPENAI_API_KEY` resolves from `op://DEV/OPENAI_API_KEY/credential`; Voyage is left unset unless you add a `VOYAGE_API_KEY` item. |
+| `COMPOSIO_API_KEY` | optional | Secret value from `op://DEV/COMPOSIO_API_KEY/credential`. Enables integrations. Without it, plain chat + memory + automations still work. |
 | `COMPOSIO_USER_ID` | optional | Stable user id Composio keys connections under. Defaults to `boop-default`. |
 | `ANTHROPIC_API_KEY` | optional | Bypass the Claude Code subscription. |
+| `BOOP_CODEX_URL` | optional | Link included when a Codex coder finishes. Defaults to `https://chatgpt.com/codex`. |
+| `BOOP_CODEX_SESSION_URL_TEMPLATE` | optional | Per-session Codex link template. Use `{sessionId}` as the placeholder if OpenAI exposes a stable ChatGPT/Codex session URL format. |
 
 ---
 
