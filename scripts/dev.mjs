@@ -97,10 +97,14 @@ const NOISE_TRIGGERS = [
 ];
 const STACK_LINE = /^\s+at\s/;
 
-function run(name, cmd, args, readyPattern) {
+function run(name, cmd, args, readyPattern, opts = {}) {
+  const childEnv = { ...process.env, FORCE_COLOR: "1", ...(opts.env ?? {}) };
+  for (const key of opts.unsetEnv ?? []) {
+    delete childEnv[key];
+  }
   const child = spawn(cmd, args, {
     cwd: root,
-    env: { ...process.env, FORCE_COLOR: "1" },
+    env: childEnv,
   });
   const prefix = `${C[name]}${name.padEnd(6)}${C.reset} │ `;
   let buf = "";
@@ -230,6 +234,9 @@ const convexChild = run(
   "npx",
   convexArgs,
   /Convex functions ready/,
+  convexEnvFile
+    ? { unsetEnv: ["CONVEX_DEPLOYMENT", "CONVEX_URL", "VITE_CONVEX_URL"] }
+    : undefined,
 );
 const debugChild = run(
   "debug",

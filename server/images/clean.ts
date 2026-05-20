@@ -3,6 +3,7 @@ import { convex } from "../convex-client.js";
 
 const DEFAULT_RETENTION_DAYS = 3;
 const DEFAULT_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const STARTUP_RETRY_MS = 30_000;
 
 function parseEnvNumber(
   name: string,
@@ -153,6 +154,10 @@ export function startImageCleanup(): () => void {
   );
   // In-flight guard so a slow cleanup can't race against the next tick.
   let running = false;
+  let startupRetry: NodeJS.Timeout | undefined;
+  let warnedConvexNotReady = false;
+  const isConvexNotReady = (err: unknown) =>
+    String(err).includes("Could not find public function");
   const tick = async () => {
     if (running) return;
     running = true;
@@ -162,12 +167,23 @@ export function startImageCleanup(): () => void {
         console.log(`[image-cleanup] deleted=${r.deleted} kept=${r.kept}`);
       }
     } catch (err) {
-      console.warn("[image-cleanup] tick failed", err);
+      if (isConvexNotReady(err)) {
+        if (!warnedConvexNotReady) {
+          console.warn("[image-cleanup] Convex functions not ready; retrying soon");
+          warnedConvexNotReady = true;
+        }
+        startupRetry = setTimeout(tick, STARTUP_RETRY_MS);
+      } else {
+        console.warn("[image-cleanup] tick failed", err);
+      }
     } finally {
       running = false;
     }
   };
-  void tick();
+  startupRetry = setTimeout(tick, STARTUP_RETRY_MS);
   const handle = setInterval(tick, intervalMs);
-  return () => clearInterval(handle);
+  return () => {
+    clearInterval(handle);
+    if (startupRetry) clearTimeout(startupRetry);
+  };
 }
