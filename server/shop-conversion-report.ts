@@ -22,7 +22,7 @@
  * Falls back to BOOP_USER_PHONE if the explicit list is unset.
  */
 
-import { getHomePageStats, getAppStoreScreenStats } from "./integrations/posthog.js";
+import { getAppStoreScreenStats, getShopPageStats } from "./integrations/posthog.js";
 import { countPaidOrdersBySource } from "./integrations/shopify.js";
 import { sendLocalImessage } from "./local-imessage.js";
 
@@ -71,7 +71,7 @@ export async function runShopConversionReport(): Promise<{ result: string }> {
   );
 
   const [webStats, appStats, orderSplit] = await Promise.all([
-    getHomePageStats(startHogQL, endHogQL),
+    getShopPageStats(startHogQL, endHogQL),
     getAppStoreScreenStats(startHogQL, endHogQL),
     countPaidOrdersBySource(startIso, endIso),
   ]);

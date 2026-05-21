@@ -51,20 +51,25 @@ export async function runHogQLQuery(hogql: string): Promise<PostHogQueryResponse
   return res.json() as Promise<PostHogQueryResponse>;
 }
 
+function escapeHogQLString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
 /**
- * Query unique homepage visitors on the website for a given UTC window.
+ * Query unique website visitors for a specific page path in a UTC window.
  * Returns { uniqueVisitors, pageviews, sessions }.
  *
  * Excludes pageviews fired from inside the mobile app's embedded WebView.
  * Those events carry `source: "mobile-app"` as a super-property (set by
  * new-atg-website's PostHogProvider when the `embed=app` cookie is
- * present) — counting them here would double-count app traffic (the
- * same visitor already shows up via the `$screen /inventory` query).
+ * present) — counting them here would double-count app traffic.
  */
-export async function getHomePageStats(
+export async function getWebsitePageStats(
+  pathname: string,
   startISO: string,
   endISO: string,
 ): Promise<{ uniqueVisitors: number; pageviews: number; sessions: number }> {
+  const escapedPathname = escapeHogQLString(pathname);
   const hogql = `
 SELECT
   count()                                    AS pageviews,
@@ -72,7 +77,7 @@ SELECT
   count(DISTINCT properties.$session_id)     AS sessions
 FROM events
 WHERE event = '$pageview'
-  AND properties.$pathname = '/'
+  AND properties.$pathname = '${escapedPathname}'
   AND coalesce(properties.source, '') != 'mobile-app'
   AND timestamp >= toDateTime('${startISO}')
   AND timestamp <  toDateTime('${endISO}')
@@ -89,6 +94,20 @@ WHERE event = '$pageview'
     uniqueVisitors: Number(row[1] ?? 0),
     sessions: Number(row[2] ?? 0),
   };
+}
+
+export async function getHomepageStats(
+  startISO: string,
+  endISO: string,
+): Promise<{ uniqueVisitors: number; pageviews: number; sessions: number }> {
+  return getWebsitePageStats("/", startISO, endISO);
+}
+
+export async function getShopPageStats(
+  startISO: string,
+  endISO: string,
+): Promise<{ uniqueVisitors: number; pageviews: number; sessions: number }> {
+  return getWebsitePageStats("/shop", startISO, endISO);
 }
 
 /**

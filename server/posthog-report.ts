@@ -13,7 +13,7 @@
  *   3. Texts Ferdinand Haag exactly: "<N> website visitors" — nothing else.
  */
 
-import { getHomePageStats } from "./integrations/posthog.js";
+import { getHomepageStats } from "./integrations/posthog.js";
 import { sendLocalImessage } from "./local-imessage.js";
 
 /** Ferdinand Haag's number. Override via POSTHOG_REPORT_TO env var if needed. */
@@ -109,7 +109,7 @@ export async function runPosthogWeeklyReport(): Promise<{ result: string }> {
 
   console.log(`[posthog-report] querying window ${startStr} → ${endStr}`);
 
-  const stats = await getHomePageStats(startStr, endStr);
+  const stats = await getHomepageStats(startStr, endStr);
   const { uniqueVisitors } = stats;
 
   const recipient = (process.env.POSTHOG_REPORT_TO ?? DEFAULT_RECIPIENT).trim();
