@@ -8,6 +8,7 @@ import { getUserTimezone } from "./timezone-config.js";
 import { runPosthogWeeklyReport } from "./posthog-report.js";
 import { runShopConversionReport } from "./shop-conversion-report.js";
 import { runFlightPriceWatch } from "./flight-price-watch.js";
+import { formatError } from "./error-format.js";
 
 function randomId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -25,6 +26,13 @@ const SYSTEM_HANDLERS: Record<
   shop_conversion_report: runShopConversionReport,
   flight_price_watch: runFlightPriceWatch,
 };
+
+function automationError(err: unknown): string {
+  const formatted = formatError(err).trim();
+  if (formatted) return formatted;
+  if (err instanceof Error) return err.name || "Error";
+  return String(err);
+}
 
 // When a timezone is present, croner evaluates the expression in that zone.
 // Without it, croner falls back to the host zone.
@@ -189,7 +197,11 @@ export async function skipNextAutomationRun(automationId: string): Promise<{
 }
 
 export async function tickAutomations(): Promise<void> {
-  const all = await convex.query(api.automations.list, { enabledOnly: true });
+  const all = await convex
+    .query(api.automations.list, { enabledOnly: true })
+    .catch((err) => {
+      throw new Error(`list enabled automations failed: ${automationError(err)}`);
+    });
   const now = Date.now();
   const due = all.filter((a) => a.nextRunAt !== undefined && a.nextRunAt <= now);
   for (const a of due) {
@@ -293,8 +305,15 @@ export async function bootstrapFlightPriceWatch(): Promise<void> {
 }
 
 export function startAutomationLoop(intervalMs = 30_000): () => void {
+  let running = false;
   const timer = setInterval(() => {
-    tickAutomations().catch((err) => console.error("[automations] tick error", err));
+    if (running) return;
+    running = true;
+    tickAutomations()
+      .catch((err) => console.error(`[automations] tick error: ${automationError(err)}`))
+      .finally(() => {
+        running = false;
+      });
   }, intervalMs);
   return () => clearInterval(timer);
 }
