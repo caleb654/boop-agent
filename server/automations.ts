@@ -238,7 +238,7 @@ export async function bootstrapPosthogWeeklyReport(): Promise<void> {
   const next = nextRunFor(schedule) ?? undefined;
   await convex.mutation(api.automations.upsertSystem, {
     automationId: POSTHOG_REPORT_AUTOMATION_ID,
-    name: "PostHog: weekly /shop visitors → Ferdinand",
+    name: "PostHog: weekly homepage visitors → Ferdinand",
     schedule,
     systemHandler: "posthog_weekly_report",
     nextRunAt: next,

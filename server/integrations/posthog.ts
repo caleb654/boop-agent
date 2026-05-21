@@ -52,7 +52,7 @@ export async function runHogQLQuery(hogql: string): Promise<PostHogQueryResponse
 }
 
 /**
- * Query unique /shop page visitors on the website for a given UTC window.
+ * Query unique homepage visitors on the website for a given UTC window.
  * Returns { uniqueVisitors, pageviews, sessions }.
  *
  * Excludes pageviews fired from inside the mobile app's embedded WebView.
@@ -72,7 +72,7 @@ SELECT
   count(DISTINCT properties.$session_id)     AS sessions
 FROM events
 WHERE event = '$pageview'
-  AND properties.$pathname = '/shop'
+  AND properties.$pathname = '/'
   AND coalesce(properties.source, '') != 'mobile-app'
   AND timestamp >= toDateTime('${startISO}')
   AND timestamp <  toDateTime('${endISO}')

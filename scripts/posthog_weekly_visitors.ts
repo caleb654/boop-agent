@@ -4,7 +4,7 @@
  * Run: `npx tsx scripts/posthog_weekly_visitors.ts`
  *
  * Reads POSTHOG_API_KEY from .env.local. Queries the most recent completed
- * Thu→Wed UTC week for COUNT(DISTINCT person_id) on $pageview '/shop'.
+ * Thu→Wed UTC week for COUNT(DISTINCT person_id) on homepage $pageview '/'.
  * Sends the result via the local imsg CLI to the configured recipient.
  */
 
@@ -104,7 +104,7 @@ async function main(): Promise<void> {
 SELECT count(DISTINCT person_id) AS unique_visitors
 FROM events
 WHERE event = '$pageview'
-  AND properties.$pathname = '/shop'
+  AND properties.$pathname = '/'
   AND timestamp >= toDateTime('${startStr}')
   AND timestamp <  toDateTime('${endStr}')
   `.trim();
