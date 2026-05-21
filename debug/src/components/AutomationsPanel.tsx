@@ -181,19 +181,25 @@ function AutomationDetail({
   const remove = useMutation(api.automations.remove);
   const [running, setRunning] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
 
   const triggerRun = async () => {
     if (running) return;
     setRunning(true);
+    setActionStatus(null);
     try {
       const r = await fetch(`/api/automations/${automationId}/run`, {
         method: "POST",
       });
       if (!r.ok) {
         const body = await r.text();
+        setActionStatus(`Run failed: ${body || r.status}`);
         console.error("[automations] run failed", r.status, body);
+      } else {
+        setActionStatus("Run started");
       }
     } catch (err) {
+      setActionStatus(`Run failed: ${err instanceof Error ? err.message : String(err)}`);
       console.error("[automations] run error", err);
     } finally {
       // Brief delay so the user sees the spinner state even on fast triggers.
@@ -204,15 +210,20 @@ function AutomationDetail({
   const skipNext = async () => {
     if (skipping) return;
     setSkipping(true);
+    setActionStatus(null);
     try {
       const r = await fetch(`/api/automations/${automationId}/skip-next`, {
         method: "POST",
       });
       if (!r.ok) {
         const body = await r.text();
+        setActionStatus(`Skip failed: ${body || r.status}`);
         console.error("[automations] skip failed", r.status, body);
+      } else {
+        setActionStatus("Next run skipped");
       }
     } catch (err) {
+      setActionStatus(`Skip failed: ${err instanceof Error ? err.message : String(err)}`);
       console.error("[automations] skip error", err);
     } finally {
       setTimeout(() => setSkipping(false), 400);
@@ -330,6 +341,12 @@ function AutomationDetail({
           Delete
         </button>
       </div>
+
+      {actionStatus && (
+        <div className={subtlePanelClass(isDark, "px-3 py-2 text-xs")}>
+          <span className={bodyTextClass(isDark)}>{actionStatus}</span>
+        </div>
+      )}
 
       <div className={panelCardClass(isDark, "space-y-2 px-4 py-3")}>
         <div>

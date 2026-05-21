@@ -8,7 +8,11 @@ import { createSendblueRouter, mountAtgImageRoute } from "./sendblue.js";
 import { handleUserMessage } from "./interaction-agent.js";
 import { loadIntegrations } from "./integrations/registry.js";
 import { startCleanupLoop } from "./memory/clean.js";
-import { startAutomationLoop } from "./automations.js";
+import {
+  skipNextAutomationRun,
+  startAutomationLoop,
+  triggerAutomation,
+} from "./automations.js";
 import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
 import { cancelAgent, retryAgent } from "./execution-agent.js";
@@ -148,6 +152,30 @@ async function main() {
       );
       res.json({ ok: true, triggered: "manual" });
     } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.post("/automations/:automationId/run", async (req, res) => {
+    try {
+      const ok = await triggerAutomation(req.params.automationId);
+      if (!ok) {
+        res.status(404).json({ error: "automation not found" });
+        return;
+      }
+      res.json({ ok: true, triggered: "manual" });
+    } catch (err) {
+      console.error("[automations] trigger failed", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.post("/automations/:automationId/skip-next", async (req, res) => {
+    try {
+      const result = await skipNextAutomationRun(req.params.automationId);
+      res.status(result.ok ? 200 : 404).json(result);
+    } catch (err) {
+      console.error("[automations] skip failed", err);
       res.status(500).json({ error: String(err) });
     }
   });

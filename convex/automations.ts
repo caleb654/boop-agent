@@ -55,7 +55,10 @@ export const upsertSystem = mutation({
         schedule: args.schedule,
         systemHandler: args.systemHandler,
         name: args.name,
+        task: "(system handler)",
+        integrations: [],
         timezone: args.timezone,
+        kind: "system",
         notifyConversationId: args.notifyConversationId,
         ...(scheduleChanged ? { nextRunAt: args.nextRunAt } : {}),
       });
