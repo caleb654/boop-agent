@@ -101,6 +101,10 @@ export function weeklyHomepageWindow(now = new Date()): {
   };
 }
 
+export function resolvePosthogReportRecipient(): string {
+  return process.env.POSTHOG_REPORT_TO?.trim() || DEFAULT_RECIPIENT;
+}
+
 export async function runPosthogWeeklyReport(): Promise<{ result: string }> {
   const { start, end, timeZone } = weeklyHomepageWindow();
 
@@ -112,7 +116,7 @@ export async function runPosthogWeeklyReport(): Promise<{ result: string }> {
   const stats = await getHomepageStats(startStr, endStr);
   const { uniqueVisitors } = stats;
 
-  const recipient = (process.env.POSTHOG_REPORT_TO ?? DEFAULT_RECIPIENT).trim();
+  const recipient = resolvePosthogReportRecipient();
   const message = `${uniqueVisitors} website visitors`;
 
   await sendLocalImessage(recipient, message);
