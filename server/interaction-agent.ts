@@ -313,9 +313,33 @@ export function resolveSpawnIntegrations(
   return requested;
 }
 
+export function isClearConversationCommand(content: string): boolean {
+  return content.trim().toLowerCase() === "clear";
+}
+
 export async function handleUserMessage(opts: HandleOpts): Promise<string> {
   const turnId = randomId("turn");
   const integrations = (await listEnabledIntegrations()).map((i) => i.name);
+
+  if (opts.kind !== "proactive" && isClearConversationCommand(opts.content)) {
+    const deleted = await convex.mutation(api.messages.clearConversation, {
+      conversationId: opts.conversationId,
+    });
+    const reply = `Cleared this conversation context. Memories are still intact.`;
+    console.log(
+      `[turn ${opts.turnTag ?? turnId.slice(-6)}] cleared conversation ${opts.conversationId} (${deleted} message${deleted === 1 ? "" : "s"})`,
+    );
+    broadcast("assistant_message", { conversationId: opts.conversationId, content: reply });
+    if (opts.persistAssistantReply) {
+      await convex.mutation(api.messages.send, {
+        conversationId: opts.conversationId,
+        role: "assistant",
+        content: reply,
+        turnId,
+      });
+    }
+    return reply;
+  }
 
   const inboundRole = opts.kind === "proactive" ? "system" : "user";
   const inboundImageStorageIds = (opts.images ?? []).map((i) => i.storageId);
