@@ -47,20 +47,27 @@ export const upsertSystem = mutation({
       .withIndex("by_automation_id", (q) => q.eq("automationId", args.automationId))
       .unique();
     if (existing) {
+      const userManagedSchedule = existing.scheduleUpdatedBy === "user";
       const scheduleChanged =
         existing.schedule !== args.schedule ||
         existing.timezone !== args.timezone ||
         existing.systemHandler !== args.systemHandler;
       await ctx.db.patch(existing._id, {
-        schedule: args.schedule,
+        schedule: userManagedSchedule ? existing.schedule : args.schedule,
         systemHandler: args.systemHandler,
         name: args.name,
         task: "(system handler)",
         integrations: [],
-        timezone: args.timezone,
+        timezone: userManagedSchedule ? existing.timezone : args.timezone,
         kind: "system",
         notifyConversationId: args.notifyConversationId,
-        ...(scheduleChanged ? { nextRunAt: args.nextRunAt } : {}),
+        ...(!userManagedSchedule && scheduleChanged
+          ? {
+              nextRunAt: args.nextRunAt,
+              scheduleUpdatedAt: Date.now(),
+              scheduleUpdatedBy: "bootstrap" as const,
+            }
+          : {}),
       });
       return existing._id;
     }
@@ -76,6 +83,8 @@ export const upsertSystem = mutation({
       systemHandler: args.systemHandler,
       notifyConversationId: args.notifyConversationId,
       nextRunAt: args.nextRunAt,
+      scheduleUpdatedAt: Date.now(),
+      scheduleUpdatedBy: "bootstrap",
       createdAt: Date.now(),
     });
   },
@@ -116,6 +125,30 @@ export const setEnabled = mutation({
       .unique();
     if (!auto) return null;
     await ctx.db.patch(auto._id, { enabled: args.enabled });
+    return auto._id;
+  },
+});
+
+export const setSchedule = mutation({
+  args: {
+    automationId: v.string(),
+    schedule: v.string(),
+    timezone: v.optional(v.string()),
+    nextRunAt: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const auto = await ctx.db
+      .query("automations")
+      .withIndex("by_automation_id", (q) => q.eq("automationId", args.automationId))
+      .unique();
+    if (!auto) return null;
+    await ctx.db.patch(auto._id, {
+      schedule: args.schedule,
+      timezone: args.timezone,
+      nextRunAt: args.nextRunAt,
+      scheduleUpdatedAt: Date.now(),
+      scheduleUpdatedBy: "user",
+    });
     return auto._id;
   },
 });

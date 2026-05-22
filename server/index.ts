@@ -12,6 +12,7 @@ import {
   skipNextAutomationRun,
   startAutomationLoop,
   triggerAutomation,
+  updateAutomationSchedule,
 } from "./automations.js";
 import { startHeartbeatLoop } from "./heartbeat.js";
 import { startConsolidationLoop } from "./consolidation.js";
@@ -176,6 +177,25 @@ async function main() {
       res.status(result.ok ? 200 : 404).json(result);
     } catch (err) {
       console.error("[automations] skip failed", err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.post("/automations/:automationId/schedule", async (req, res) => {
+    try {
+      const { schedule, timezone } = req.body ?? {};
+      if (typeof schedule !== "string" || schedule.trim() === "") {
+        res.status(400).json({ error: "schedule is required" });
+        return;
+      }
+      const result = await updateAutomationSchedule(
+        req.params.automationId,
+        schedule.trim(),
+        typeof timezone === "string" && timezone.trim() ? timezone.trim() : undefined,
+      );
+      res.status(result.ok ? 200 : 400).json(result);
+    } catch (err) {
+      console.error("[automations] schedule update failed", err);
       res.status(500).json({ error: String(err) });
     }
   });

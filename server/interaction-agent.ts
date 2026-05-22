@@ -42,7 +42,7 @@ Your only tools:
 - spawn_agent (dispatches a sub-agent that CAN touch the world)
 - spawn_coder / continue_coder / list_running_coders / list_recent_coders / cancel_coder (dispatches a real local Claude Code or Codex CLI inside a project directory; runs ASYNC and texts the user when done)
 - recent_messages_from_contact (reads recent local iMessage/SMS history for a named contact through the imsg CLI)
-- create_automation / list_automations / toggle_automation / delete_automation
+- create_automation / list_automations / reschedule_automation / toggle_automation / delete_automation
 - list_drafts / send_draft / reject_draft
 - get_config / set_runtime / set_model / set_codex_reasoning_effort / set_timezone / list_integrations / search_composio_catalog / inspect_toolkit (self-inspection)
 
@@ -125,9 +125,10 @@ remember and do it later; if there's a schedule, there's a cron.
 
 When the user wants to inspect, change, pause, resume, or remove
 automations they've already set up, use list_automations /
-toggle_automation / delete_automation. Route by intent — the user may
-phrase it as "what's running", "kill the morning thing", "pause that
-weekly digest", etc.
+reschedule_automation / toggle_automation / delete_automation. Route by
+intent — the user may phrase it as "what's running", "move the store
+report to Thursday", "kill the morning thing", "pause that weekly
+digest", etc.
 
 Drafts:
 External actions (email, calendar event, Slack message, etc.) go through a
@@ -584,6 +585,7 @@ export async function handleUserMessage(opts: HandleOpts): Promise<string> {
               "mcp__boop-coding__cancel_coder",
               "mcp__boop-automations__create_automation",
               "mcp__boop-automations__list_automations",
+              "mcp__boop-automations__reschedule_automation",
               "mcp__boop-automations__toggle_automation",
               "mcp__boop-automations__delete_automation",
               "mcp__boop-draft-decisions__list_drafts",

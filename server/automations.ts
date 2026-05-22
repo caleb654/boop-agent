@@ -196,6 +196,29 @@ export async function skipNextAutomationRun(automationId: string): Promise<{
   return { ok: true, nextRunAt: next };
 }
 
+export async function updateAutomationSchedule(
+  automationId: string,
+  schedule: string,
+  timezone?: string,
+): Promise<{
+  ok: boolean;
+  nextRunAt?: number;
+  error?: string;
+}> {
+  const validation = validateSchedule(schedule, timezone);
+  if (!validation.valid) return { ok: false, error: validation.error ?? "invalid schedule" };
+  const nextRunAt = nextRunFor(schedule, timezone) ?? undefined;
+  const id = await convex.mutation(api.automations.setSchedule, {
+    automationId,
+    schedule,
+    timezone,
+    nextRunAt,
+  });
+  if (!id) return { ok: false, error: "automation not found" };
+  broadcast("automation_schedule_updated", { automationId, schedule, timezone, nextRunAt });
+  return { ok: true, nextRunAt };
+}
+
 export async function tickAutomations(): Promise<void> {
   const all = await convex
     .query(api.automations.list, { enabledOnly: true })
@@ -254,12 +277,12 @@ const SHOP_CONVERSION_TIMEZONE = "America/New_York";
 
 /**
  * Idempotent bootstrap: ensure the store conversion-rate automation row
- * exists. Fires every Friday at 9:00 Eastern Time. Safe to call repeatedly
+ * exists. Fires every Thursday at 9:00 Eastern Time. Safe to call repeatedly
  * on startup.
  */
 export async function bootstrapShopConversionReport(): Promise<void> {
-  // Cron: minute hour dom month dow. dow 5 = Friday.
-  const schedule = "0 9 * * 5";
+  // Cron: minute hour dom month dow. dow 4 = Thursday.
+  const schedule = "0 9 * * 4";
   const next = nextRunFor(schedule, SHOP_CONVERSION_TIMEZONE) ?? undefined;
   await convex.mutation(api.automations.upsertSystem, {
     automationId: SHOP_CONVERSION_AUTOMATION_ID,

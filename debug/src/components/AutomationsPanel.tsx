@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../../convex/_generated/api.js";
 import {
@@ -36,6 +36,56 @@ function formatNextRun(ts: number): string {
     opts.year = "numeric";
   }
   return date.toLocaleString([], opts);
+}
+
+const WEEKDAYS = [
+  { value: "0", label: "Sun" },
+  { value: "1", label: "Mon" },
+  { value: "2", label: "Tue" },
+  { value: "3", label: "Wed" },
+  { value: "4", label: "Thu" },
+  { value: "5", label: "Fri" },
+  { value: "6", label: "Sat" },
+];
+
+function parseWeeklySchedule(schedule: string): { day: string; time: string } | null {
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = schedule.trim().split(/\s+/);
+  if (
+    !minute ||
+    !hour ||
+    dayOfMonth !== "*" ||
+    month !== "*" ||
+    !/^[0-6]$/.test(dayOfWeek ?? "")
+  ) {
+    return null;
+  }
+  const h = Number(hour);
+  const m = Number(minute);
+  if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+    return null;
+  }
+  return {
+    day: dayOfWeek!,
+    time: `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`,
+  };
+}
+
+function weeklyCron(day: string, time: string): string | null {
+  const [hourRaw, minuteRaw] = time.split(":");
+  const hour = Number(hourRaw);
+  const minute = Number(minuteRaw);
+  if (
+    !/^[0-6]$/.test(day) ||
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+  return `${minute} ${hour} * * ${day}`;
 }
 
 const STATUS_COLOR: Record<string, { dot: string; text: string }> = {
@@ -181,7 +231,23 @@ function AutomationDetail({
   const remove = useMutation(api.automations.remove);
   const [running, setRunning] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [scheduleDraft, setScheduleDraft] = useState("");
+  const [timezoneDraft, setTimezoneDraft] = useState("");
+  const [weekdayDraft, setWeekdayDraft] = useState("4");
+  const [timeDraft, setTimeDraft] = useState("09:00");
+
+  useEffect(() => {
+    if (!auto) return;
+    setScheduleDraft(auto.schedule);
+    setTimezoneDraft(auto.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "");
+    const weekly = parseWeeklySchedule(auto.schedule);
+    if (weekly) {
+      setWeekdayDraft(weekly.day);
+      setTimeDraft(weekly.time);
+    }
+  }, [auto?.automationId, auto?.schedule, auto?.timezone]);
 
   const triggerRun = async () => {
     if (running) return;
@@ -227,6 +293,48 @@ function AutomationDetail({
       console.error("[automations] skip error", err);
     } finally {
       setTimeout(() => setSkipping(false), 400);
+    }
+  };
+
+  const saveSchedule = async () => {
+    if (savingSchedule) return;
+    const schedule = scheduleDraft.trim();
+    if (!schedule) {
+      setActionStatus("Schedule is invalid");
+      return;
+    }
+    setSavingSchedule(true);
+    setActionStatus(null);
+    try {
+      const r = await fetch(`/api/automations/${automationId}/schedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schedule,
+          timezone: timezoneDraft.trim() || undefined,
+        }),
+      });
+      const body = await r.json().catch(() => null) as {
+        ok?: boolean;
+        error?: string;
+        nextRunAt?: number;
+      } | null;
+      if (!r.ok || body?.ok === false) {
+        setActionStatus(`Timing update failed: ${body?.error ?? r.status}`);
+      } else {
+        setScheduleDraft(schedule);
+        setActionStatus(
+          body?.nextRunAt
+            ? `Timing saved. Next run ${new Date(body.nextRunAt).toLocaleString()}`
+            : "Timing saved",
+        );
+      }
+    } catch (err) {
+      setActionStatus(
+        `Timing update failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setSavingSchedule(false);
     }
   };
 
@@ -395,6 +503,117 @@ function AutomationDetail({
             </span>
           </div>
         )}
+      </div>
+
+      <div className={panelCardClass(isDark, "space-y-3 px-4 py-3")}>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="min-w-[88px] flex-1">
+            <span
+              className={`mb-1 block text-[10px] font-bold mono ${
+                isDark ? "text-zinc-600" : "text-zinc-400"
+              }`}
+            >
+              DAY
+            </span>
+            <select
+              value={weekdayDraft}
+              onChange={(e) => {
+                setWeekdayDraft(e.target.value);
+                const cron = weeklyCron(e.target.value, timeDraft);
+                if (cron) setScheduleDraft(cron);
+              }}
+              className={`w-full rounded border px-2 py-1.5 text-xs outline-none ${
+                isDark
+                  ? "border-white/10 bg-zinc-950 text-zinc-100"
+                  : "border-zinc-200 bg-white text-zinc-900"
+              }`}
+            >
+              {WEEKDAYS.map((day) => (
+                <option key={day.value} value={day.value}>
+                  {day.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="min-w-[110px] flex-1">
+            <span
+              className={`mb-1 block text-[10px] font-bold mono ${
+                isDark ? "text-zinc-600" : "text-zinc-400"
+              }`}
+            >
+              TIME
+            </span>
+            <input
+              type="time"
+              value={timeDraft}
+              onChange={(e) => {
+                setTimeDraft(e.target.value);
+                const cron = weeklyCron(weekdayDraft, e.target.value);
+                if (cron) setScheduleDraft(cron);
+              }}
+              className={`w-full rounded border px-2 py-1.5 text-xs outline-none ${
+                isDark
+                  ? "border-white/10 bg-zinc-950 text-zinc-100"
+                  : "border-zinc-200 bg-white text-zinc-900"
+              }`}
+            />
+          </label>
+
+          <label className="min-w-[180px] flex-[2]">
+            <span
+              className={`mb-1 block text-[10px] font-bold mono ${
+                isDark ? "text-zinc-600" : "text-zinc-400"
+              }`}
+            >
+              TIMEZONE
+            </span>
+            <input
+              value={timezoneDraft}
+              onChange={(e) => setTimezoneDraft(e.target.value)}
+              className={`w-full rounded border px-2 py-1.5 text-xs outline-none ${
+                isDark
+                  ? "border-white/10 bg-zinc-950 text-zinc-100"
+                  : "border-zinc-200 bg-white text-zinc-900"
+              }`}
+            />
+          </label>
+
+          <button
+            onClick={saveSchedule}
+            disabled={savingSchedule}
+            className={`rounded border px-2.5 py-1.5 text-xs transition-colors ${
+              savingSchedule
+                ? isDark
+                  ? "border-zinc-800 text-zinc-600"
+                  : "border-zinc-200 text-zinc-400"
+                : isDark
+                  ? "border-sky-500/30 text-sky-300 hover:bg-sky-500/10"
+                  : "border-sky-300 text-sky-700 hover:bg-sky-50"
+            }`}
+          >
+            {savingSchedule ? "Saving..." : "Save timing"}
+          </button>
+        </div>
+
+        <label>
+          <span
+            className={`mb-1 block text-[10px] font-bold mono ${
+              isDark ? "text-zinc-600" : "text-zinc-400"
+            }`}
+          >
+            CRON
+          </span>
+          <input
+            value={scheduleDraft}
+            onChange={(e) => setScheduleDraft(e.target.value)}
+            className={`w-full rounded border px-2 py-1.5 text-xs mono outline-none ${
+              isDark
+                ? "border-white/10 bg-zinc-950 text-zinc-100"
+                : "border-zinc-200 bg-white text-zinc-900"
+            }`}
+          />
+        </label>
       </div>
 
       <div className={panelCardClass(isDark, "overflow-hidden")}>

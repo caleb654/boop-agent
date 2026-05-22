@@ -172,6 +172,8 @@ export default defineSchema({
     notifyConversationId: v.optional(v.string()),
     lastRunAt: v.optional(v.number()),
     nextRunAt: v.optional(v.number()),
+    scheduleUpdatedAt: v.optional(v.number()),
+    scheduleUpdatedBy: v.optional(v.union(v.literal("bootstrap"), v.literal("user"))),
     createdAt: v.number(),
     // 'task' (default) → fires spawnExecutionAgent with the LLM task.
     // 'system' → runs a registered server-side handler (chat.db scan, etc.)

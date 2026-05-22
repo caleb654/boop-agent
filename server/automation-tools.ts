@@ -2,7 +2,7 @@ import { z } from "zod";
 import { api } from "../convex/_generated/api.js";
 import { convex } from "./convex-client.js";
 import { availableIntegrations } from "./execution-agent.js";
-import { nextRunFor, validateSchedule } from "./automations.js";
+import { nextRunFor, updateAutomationSchedule, validateSchedule } from "./automations.js";
 import { describeUserNow } from "./timezone-config.js";
 import { createClaudeMcpServer } from "./runtimes/claude.js";
 import { defineRuntimeTool } from "./runtimes/tool.js";
@@ -97,21 +97,68 @@ Integrations available: ${integrationHint}`,
     defineRuntimeTool(
       NAMESPACE,
       "list_automations",
-      "List all automations for this conversation.",
+      "List all automations, including global system automations not created from this conversation.",
       { enabledOnly: z.boolean().optional().default(false) },
       async (args) => {
         const all = await convex.query(api.automations.list, {
           enabledOnly: args.enabledOnly,
         });
-        const mine = all.filter((a) => a.conversationId === conversationId);
-        if (mine.length === 0) {
+        if (all.length === 0) {
           return runtimeText("No automations.");
         }
-        const lines = mine.map(
-          (a) =>
-            `• [${a.automationId}] ${a.enabled ? "●" : "○"} "${a.name}" — ${a.schedule} — ${a.task}`,
-        );
+        const lines = all.map((a) => {
+          const scope =
+            a.conversationId === conversationId
+              ? "this conversation"
+              : a.kind === "system"
+                ? "global system"
+                : "other conversation";
+          const tz = a.timezone ? ` ${a.timezone}` : "";
+          const next = a.nextRunAt ? ` — next ${new Date(a.nextRunAt).toLocaleString()}` : "";
+          return `• [${a.automationId}] ${a.enabled ? "●" : "○"} "${a.name}" — ${a.schedule}${tz} — ${scope}${next} — ${a.task}`;
+        });
         return runtimeText(lines.join("\n"));
+      },
+    ),
+
+    defineRuntimeTool(
+      NAMESPACE,
+      "reschedule_automation",
+      `Change an existing automation's recurring schedule by id.
+
+Cron expressions use 5 fields: min hour day-of-month month day-of-week. Write times in the automation's local clock. For example, Thursday 9am is "0 9 * * 4"; Friday 9am is "0 9 * * 5". Pass the existing timezone from list_automations unless the user explicitly asks to change it.`,
+      {
+        automationId: z.string(),
+        schedule: z.string().describe("Cron expression (5 fields)."),
+        timezone: z
+          .string()
+          .optional()
+          .describe("IANA timezone, e.g. America/New_York. Use the existing automation timezone unless changing it."),
+      },
+      async (args) => {
+        const existing = await convex.query(api.automations.get, {
+          automationId: args.automationId,
+        });
+        if (!existing) return runtimeText("Not found.", false);
+        const timezone = args.timezone ?? existing.timezone ?? (await describeUserNow()).timezone;
+        const result = await updateAutomationSchedule(args.automationId, args.schedule, timezone);
+        if (!result.ok) {
+          return runtimeText(`Could not reschedule: ${result.error ?? "unknown error"}`, false);
+        }
+        const nextStr = result.nextRunAt
+          ? new Intl.DateTimeFormat("en-US", {
+              timeZone: timezone,
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit",
+              timeZoneName: "short",
+            }).format(new Date(result.nextRunAt))
+          : "unknown";
+        return runtimeText(
+          `Rescheduled ${args.automationId} "${existing.name}" to ${args.schedule} (${timezone}). Next run: ${nextStr}.`,
+        );
       },
     ),
 
